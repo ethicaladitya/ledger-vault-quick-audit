@@ -96,3 +96,69 @@ def test_login_rate_limit(client):
     for _ in range(10):
         assert client.post("/auth/login", json={"email": "rl@example.com", "password": "wrong-password"}).status_code == 401
     assert client.post("/auth/login", json={"email": "rl@example.com", "password": "correct-horse-battery"}).status_code == 429
+
+
+DIVIDENDS = """date,narration,debit,credit
+2025-06-21,ACH C- LARSEN AND TOUBRO LI-25213838,,34
+2025-07-28,ACH C- HCL 2ND INTDIV25 26-601092,,24
+2025-08-01,NEFT CR-GOATLIFE FARMS,,500
+2025-08-02,NEFT CR-GOATLIFE FARMS REF 2,,700
+2025-09-01,POS 416021XXXXXX9685 GOATLIFE,300,
+"""
+
+
+def test_dividends_and_learning_from_corrections(client):
+    h = signup(client)
+    upload(client, h, [("idfc.csv", DIVIDENDS)], "IDFC Savings")
+    items = client.get("/transactions", headers=h).json()["items"]
+    by = {t["narration"]: t for t in items}
+    assert by["ACH C- LARSEN AND TOUBRO LI-25213838"]["category"] == "dividend"
+    assert by["ACH C- HCL 2ND INTDIV25 26-601092"]["category"] == "dividend"
+    first = by["NEFT CR-GOATLIFE FARMS"]
+    r = client.patch(f"/transactions/{first['id']}", headers=h, json={"category": "business_receipt"}).json()
+    assert r["similar"] == {"key": "goatlife farms", "count": 1}  # the debit-side POS row is not "similar"
+    r = client.patch(f"/transactions/{first['id']}", headers=h, json={"category": "business_receipt", "apply_similar": True}).json()
+    assert r["applied"] == 1
+    # Remembered for the next upload.
+    upload(client, h, [("idfc2.csv", "date,narration,debit,credit\n2025-10-01,NEFT CR-GOATLIFE FARMS X,,900\n")], "IDFC Savings")
+    newest = client.get("/transactions?limit=1", headers=h).json()["items"][0]
+    assert newest["category"] == "business_receipt" and newest["status"] == "ok"
+
+
+def test_rules_upgrade_keeps_user_choices(client, db):
+    from app.models import AppMeta, Transaction
+    from app import migrate
+    h = signup(client)
+    upload(client, h, [("idfc.csv", DIVIDENDS)], "IDFC Savings")
+    rows = db.query(Transaction).order_by(Transaction.id).all()
+    rows[0].category = "uncategorized"          # as an old rule set would have left it
+    rows[1].category, rows[1].category_source = "rent", "user"  # the user's explicit choice
+    db.get(AppMeta, "rules_version").value = "0"
+    db.commit()
+    migrate.reclassify_if_rules_changed()
+    db.expire_all()
+    assert db.get(Transaction, rows[0].id).category == "dividend"
+    assert db.get(Transaction, rows[1].id).category == "rent"
+
+
+def test_review_and_confirm_after_upload(client):
+    h = signup(client)
+    res = upload(client, h, [("idfc.csv", DIVIDENDS)], "IDFC Savings")
+    doc = res["files"][0]["document_id"]
+    review = client.get(f"/imports/review?docs={doc}", headers=h).json()
+    assert review["statements"][0]["account"] == "IDFC Savings" and review["statements"][0]["transactions"] == 5
+    groups = review["groups"]
+    assert groups[0]["needs_review"] is True  # undecided groups come first
+    goat_in = next(g for g in groups if g["key"] == "goatlife farms")
+    assert goat_in["count"] == 2 and goat_in["direction"] == "in"
+    payload = [{"tx_ids": g["tx_ids"], "category": "business_receipt" if g is goat_in else g["category"],
+                "remember_key": g["key"] if g is goat_in else None} for g in groups]
+    r = client.post("/imports/confirm", headers=h, json={"groups": payload}).json()
+    assert r["updated"] == 5 and r["remembered"] == 1
+    assert client.get("/dashboard", headers=h).json()["exceptions"] == 0
+    # Rename and re-type the detected account.
+    acc = review["statements"][0]["account_id"]
+    assert client.patch(f"/accounts/{acc}", headers=h, json={"name": "IDFC FIRST Savings", "kind": "bank"}).json()["name"] == "IDFC FIRST Savings"
+    other = signup(client, "other@example.com")
+    assert client.get(f"/imports/review?docs={doc}", headers=other).json() == {"statements": [], "groups": []}
+    assert client.patch(f"/accounts/{acc}", headers=other, json={"name": "x"}).status_code == 404

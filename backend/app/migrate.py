@@ -39,20 +39,30 @@ def run():
             conn.execute(text("ALTER TABLE source_documents DROP CONSTRAINT IF EXISTS source_documents_sha256_key"))
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_document ON source_documents (workspace_id, sha256)"))
 
-    if ("transactions", "category_source") in added:
-        _reclassify_legacy_rows()
+    reclassify_if_rules_changed()
 
 
-def _reclassify_legacy_rows():
-    """Rows imported before v0.2 used the old rules (e.g. every UPI payment was 'dining')."""
+def reclassify_if_rules_changed():
+    """Re-apply narration rules to rule-categorised rows when RULES_VERSION changes; user choices are kept."""
     from .database import SessionLocal
-    from .models import Transaction, FinancialAccount, Workspace
-    from .services.rules import classify
+    from .models import AppMeta, Transaction, FinancialAccount, Workspace, UserRule
+    from .services.rules import RULES_VERSION, classify
     from .services.reconciliation import reconcile
     with SessionLocal() as db:
-        kinds = {a.id: a.kind for a in db.query(FinancialAccount)}
-        for t in db.query(Transaction):
-            t.category = classify(t.narration, t.debit > 0, kinds.get(t.account_id, "bank"))
+        meta = db.get(AppMeta, "rules_version")
+        if meta and meta.value == str(RULES_VERSION):
+            return
+        accounts = {a.id: a for a in db.query(FinancialAccount)}
+        learned: dict[int, dict[str, str]] = {}
+        for r in db.query(UserRule):
+            learned.setdefault(r.workspace_id, {})[r.key] = r.category
+        for t in db.query(Transaction).filter(Transaction.category_source != "user"):
+            a = accounts.get(t.account_id)
+            t.category = classify(t.narration, t.debit > 0, a.kind if a else "bank", learned.get(a.workspace_id) if a else None)
+        if meta:
+            meta.value = str(RULES_VERSION)
+        else:
+            db.add(AppMeta(key="rules_version", value=str(RULES_VERSION)))
         db.commit()
         for (ws_id,) in db.query(Workspace.id):
             reconcile(db, ws_id)

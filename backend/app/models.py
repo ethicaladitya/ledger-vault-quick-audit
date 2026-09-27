@@ -91,3 +91,20 @@ class AuditEvent(Base):
     action: Mapped[str] = mapped_column(String(80))
     detail: Mapped[str] = mapped_column(Text)
     at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AppMeta(Base):
+    __tablename__ = "app_meta"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(255))
+
+
+class UserRule(Base):
+    """A category the user taught for a counter-party (see rules.merchant_key)."""
+    __tablename__ = "user_rules"
+    __table_args__ = (UniqueConstraint("workspace_id", "key", name="uq_workspace_rule"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"))
+    key: Mapped[str] = mapped_column(String(120))
+    category: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

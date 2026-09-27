@@ -9,7 +9,7 @@ export type Tx = {
 export type Category = { key: string; label: string; group: string; itr_hint: string };
 export type Account = { id: number; name: string; kind: string; transactions: number };
 export type Doc = { id: number; filename: string; imported_at: string; transactions: number; account: string | null; kind: string | null; from: string | null; to: string | null; warnings: string[] };
-export type FileResult = { filename: string; transactions?: number; duplicate?: boolean; error?: string; message?: string; account?: string; period?: string; warnings?: string[] };
+export type FileResult = { filename: string; transactions?: number; duplicate?: boolean; needs_password?: boolean; error?: string; message?: string; account?: string; kind?: string; period?: string; warnings?: string[]; document_id?: number; account_id?: number };
 export type Year = { financial_year: string; transactions: number };
 
 export const money = (v: string | number | null | undefined) =>

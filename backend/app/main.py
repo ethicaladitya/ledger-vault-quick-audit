@@ -1,4 +1,5 @@
-import os
+import os, re
+from decimal import Decimal
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import Response
@@ -6,12 +7,13 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from .database import get_db
-from .models import Workspace, Transaction, FinancialAccount, User, SourceDocument, AuditEvent
+from .models import Workspace, Transaction, FinancialAccount, User, SourceDocument, AuditEvent, UserRule
 from .security import hash_password, verify_password, token_for, current_user, check_login_allowed, record_login_failure
 from .services.ingestion import import_file, import_path, MAX_FILE
+from .services.passwords import Hints
 from .services.reconciliation import reconcile, base_status
 from .services.report import fy_transactions, totals, category_summary, flags, export_xlsx
-from .services.rules import CATEGORIES, NEUTRAL
+from .services.rules import CATEGORIES, NEUTRAL, merchant_key, classify
 from . import migrate
 
 # Registration is open only until the first account exists, unless explicitly enabled.
@@ -40,6 +42,22 @@ class Login(BaseModel):
 class TxUpdate(BaseModel):
     category: str | None = None
     note: str | None = Field(default=None, max_length=1000)
+    apply_similar: bool = False  # also re-categorise same-counterparty rows and remember it for future uploads
+
+
+class AccountUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    kind: str | None = Field(default=None, pattern="^(bank|card)$")
+
+
+class ConfirmGroup(BaseModel):
+    tx_ids: list[int] = Field(max_length=5000)
+    category: str
+    remember_key: str | None = Field(default=None, max_length=120)
+
+
+class ConfirmImport(BaseModel):
+    groups: list[ConfirmGroup] = Field(max_length=2000)
 
 
 class FolderImport(BaseModel):
@@ -114,14 +132,22 @@ def health():
 # ---------------- imports ----------------
 
 @app.post("/imports/upload")
-async def upload(files: list[UploadFile] = File(...), account_name: str = Form(..., min_length=1, max_length=120),
-                 kind: str = Form("bank", pattern="^(bank|card)$"), db: Session = Depends(get_db), user: User = Depends(current_user)):
+async def upload(files: list[UploadFile] = File(...), account_name: str = Form("", max_length=120),
+                 kind: str = Form("auto", pattern="^(auto|bank|card)$"),
+                 name: str = Form("", max_length=120), dob: str = Form("", max_length=20), pan: str = Form("", max_length=10),
+                 extras: str = Form("", max_length=500), password: str = Form("", max_length=200),
+                 db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Leave account_name empty and kind=auto to detect accounts from the statements themselves.
+
+    name/dob/pan/extras only generate candidate PDF passwords for this request; they are never stored or logged.
+    """
     if len(files) > MAX_FILES_PER_UPLOAD:
         raise HTTPException(400, f"Upload at most {MAX_FILES_PER_UPLOAD} files at a time")
+    hints = Hints(name=name, dob=dob, pan=pan, extras=[e for e in re.split(r"[,\s]+", extras) if e], passwords=[password] if password else [])
     results = []
     for f in files:
         data = await f.read(MAX_FILE + 1)
-        results += import_file(db, f.filename or "upload", data, account_name, kind, user.workspace_id)
+        results += import_file(db, f.filename or "upload", data, account_name, kind, user.workspace_id, hints)
     return {"files": results, "reconciliation": reconcile(db, user.workspace_id)}
 
 
@@ -155,9 +181,86 @@ def folder_import(body: FolderImport, db: Session = Depends(get_db), user: User 
         raise HTTPException(403, "Path must be a directory within the configured /imports mount")
     results = []
     for p in sorted(root.rglob("*")):
-        if p.is_file() and p.suffix.lower() in {".csv", ".xls", ".xlsx", ".zip"}:
+        if p.is_file() and p.suffix.lower() in {".pdf", ".csv", ".xls", ".xlsx", ".zip"}:
             results += import_path(db, p, body.account_name, body.kind, user.workspace_id)
     return {"files": results, "reconciliation": reconcile(db, user.workspace_id)}
+
+
+# ---------------- post-upload review ----------------
+
+@app.get("/imports/review")
+def import_review(docs: str = Query(..., max_length=2000), db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Detected accounts and suggested categories for just-uploaded statements, grouped by payee."""
+    ids = [int(x) for x in docs.split(",") if x.strip().isdigit()][:200]
+    documents = db.query(SourceDocument).filter(SourceDocument.workspace_id == user.workspace_id, SourceDocument.id.in_(ids)).all()
+    accounts = {a.id: a for a in db.query(FinancialAccount).filter_by(workspace_id=user.workspace_id)}
+    rows = db.query(Transaction).filter(Transaction.document_id.in_([d.id for d in documents])).order_by(Transaction.txn_date).all()
+    statements = []
+    for d in documents:
+        mine = [t for t in rows if t.document_id == d.id]
+        a = accounts.get(d.account_id)
+        statements.append({"document_id": d.id, "filename": d.filename, "account_id": d.account_id, "account": a.name if a else None,
+                           "kind": a.kind if a else None, "transactions": len(mine),
+                           "period": f"{mine[0].txn_date.isoformat()} to {mine[-1].txn_date.isoformat()}" if mine else None})
+    groups: dict[tuple, dict] = {}
+    for t in rows:
+        key = merchant_key(t.narration)
+        gk = (key or t.narration.lower(), t.category, t.debit > 0)
+        g = groups.setdefault(gk, {"key": key, "example": t.narration, "category": t.category, "direction": "out" if t.debit > 0 else "in",
+                                   "count": 0, "total": Decimal(), "tx_ids": [], "confirmed": True})
+        g["count"] += 1
+        g["total"] += t.debit if t.debit > 0 else t.credit
+        g["tx_ids"].append(t.id)
+        g["confirmed"] = g["confirmed"] and t.category_source == "user"
+    out = sorted(groups.values(), key=lambda g: (CATEGORIES.get(g["category"], ("", "review", ""))[1] != "review", -g["count"], -g["total"]))
+    for g in out:
+        g["total"] = str(g["total"])
+        g["needs_review"] = CATEGORIES.get(g["category"], ("", "review", ""))[1] == "review"
+    return {"statements": statements, "groups": out}
+
+
+@app.post("/imports/confirm")
+def import_confirm(body: ConfirmImport, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Saves the reviewed categories; changed groups can be remembered as rules for future uploads."""
+    updated = remembered = 0
+    for g in body.groups:
+        if g.category not in CATEGORIES:
+            raise HTTPException(400, f"Unknown category {g.category}")
+        rows = (db.query(Transaction).join(FinancialAccount)
+                .filter(FinancialAccount.workspace_id == user.workspace_id, Transaction.id.in_(g.tx_ids)).all())
+        for t in rows:
+            t.category, t.category_source = g.category, "user"
+        updated += len(rows)
+        if g.remember_key:
+            rule = db.query(UserRule).filter_by(workspace_id=user.workspace_id, key=g.remember_key).first()
+            if rule:
+                rule.category = g.category
+            else:
+                db.add(UserRule(workspace_id=user.workspace_id, key=g.remember_key, category=g.category))
+            remembered += 1
+    db.add(AuditEvent(workspace_id=user.workspace_id, action="import_confirmed", detail=f"{updated} rows confirmed; {remembered} rules remembered"))
+    db.commit()
+    return {"updated": updated, "remembered": remembered, "reconciliation": reconcile(db, user.workspace_id)}
+
+
+@app.patch("/accounts/{account_id}")
+def update_account(account_id: int, body: AccountUpdate, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    account = db.query(FinancialAccount).filter_by(id=account_id, workspace_id=user.workspace_id).first()
+    if not account:
+        raise HTTPException(404, "Account not found")
+    if body.name and body.name.strip() != account.name:
+        if db.query(FinancialAccount).filter_by(workspace_id=user.workspace_id, name=body.name.strip()).first():
+            raise HTTPException(409, "You already have an account with that name")
+        account.name = body.name.strip()
+    if body.kind and body.kind != account.kind:
+        account.kind = body.kind
+        learned = {u.key: u.category for u in db.query(UserRule).filter_by(workspace_id=user.workspace_id)}
+        for t in db.query(Transaction).filter(Transaction.account_id == account.id, Transaction.category_source != "user"):
+            t.category = classify(t.narration, t.debit > 0, account.kind, learned)
+    db.add(AuditEvent(workspace_id=user.workspace_id, action="account_updated", detail=f"account #{account.id}"))
+    db.commit()
+    reconcile(db, user.workspace_id)
+    return {"id": account.id, "name": account.name, "kind": account.kind}
 
 
 # ---------------- documents & accounts ----------------
@@ -246,15 +349,26 @@ def transactions(fy: str | None = None, status: str | None = None, category: str
     return {"total": total, "items": [_tx_json(t, a) for t, a in rows]}
 
 
+def _similar(db: Session, workspace_id: int, row: Transaction):
+    """Other rows from the same counter-party that the user hasn't categorised by hand."""
+    key = merchant_key(row.narration)
+    if not key:
+        return key, []
+    candidates = (db.query(Transaction).join(FinancialAccount)
+                  .filter(FinancialAccount.workspace_id == workspace_id, Transaction.id != row.id, Transaction.category_source != "user",
+                          (Transaction.debit > 0) if row.debit > 0 else (Transaction.credit > 0)).all())
+    return key, [t for t in candidates if merchant_key(t.narration) == key]
+
+
 @app.patch("/transactions/{tx_id}")
 def update_transaction(tx_id: int, body: TxUpdate, db: Session = Depends(get_db), user: User = Depends(current_user)):
     row = (db.query(Transaction).join(FinancialAccount).filter(Transaction.id == tx_id, FinancialAccount.workspace_id == user.workspace_id).first())
     if not row:
         raise HTTPException(404, "Transaction not found")
     changes = []
+    if body.category is not None and body.category not in CATEGORIES:
+        raise HTTPException(400, "Unknown category")
     if body.category is not None and body.category != row.category:
-        if body.category not in CATEGORIES:
-            raise HTTPException(400, "Unknown category")
         changes.append(f"category {row.category} -> {body.category}")
         row.category, row.category_source = body.category, "user"
     elif body.category is not None:
@@ -262,11 +376,25 @@ def update_transaction(tx_id: int, body: TxUpdate, db: Session = Depends(get_db)
     if body.note is not None:
         changes.append("note updated")
         row.note = body.note.strip() or None
+    applied = 0
+    key, similar = _similar(db, user.workspace_id, row)
+    if body.apply_similar and body.category and key:
+        for t in similar:
+            t.category, t.category_source = body.category, "user"
+        applied = len(similar)
+        rule = db.query(UserRule).filter_by(workspace_id=user.workspace_id, key=key).first()
+        if rule:
+            rule.category = body.category
+        else:
+            db.add(UserRule(workspace_id=user.workspace_id, key=key, category=body.category))
+        changes.append(f"applied to {applied} similar and remembered for '{key}'")
     db.add(AuditEvent(workspace_id=user.workspace_id, action="transaction_updated", detail=f"#{row.id}: {'; '.join(changes) or 'confirmed'}"))
     db.commit()
     reconcile(db, user.workspace_id)
     db.refresh(row)
-    return _tx_json(row, db.get(FinancialAccount, row.account_id))
+    pending = [t for t in similar if t.category != row.category] if not body.apply_similar else []
+    return {**_tx_json(row, db.get(FinancialAccount, row.account_id)), "applied": applied,
+            "similar": {"key": key, "count": len(pending)} if pending and body.category else None}
 
 
 @app.get("/reconciliation")

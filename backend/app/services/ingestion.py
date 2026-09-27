@@ -1,4 +1,4 @@
-"""Statement ingestion: CSV / XLSX / XLS / ZIP bank and credit-card exports.
+"""Statement ingestion: PDF / CSV / XLSX / XLS / ZIP bank and credit-card statements.
 
 The generic parser finds the header row (Indian bank exports usually have
 several lines of account details above it), maps common column names, and
@@ -10,11 +10,13 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath
 from sqlalchemy.orm import Session
-from ..models import SourceDocument, FinancialAccount, Transaction, AuditEvent
+from ..models import SourceDocument, FinancialAccount, Transaction, AuditEvent, UserRule
 from .rules import classify
+from .passwords import Hints
+from .pdf import NeedsPassword, PdfError, unlock, read_pdf, detect, parse_pdf, account_name as pdf_account_name
 
 MAX_FILE = 50 * 1024 * 1024
-SUPPORTED = {".csv", ".txt", ".xlsx", ".xlsm", ".xls"}
+SUPPORTED = {".pdf", ".csv", ".txt", ".xlsx", ".xlsm", ".xls"}
 
 # Ordered by preference: the first synonym found wins for each field.
 COLUMNS = {
@@ -99,7 +101,7 @@ def safe_zip(data: bytes) -> list[tuple[str, bytes]]:
                 raise ImportError_("Unsafe ZIP path")
             if p.name.startswith(".") or "__MACOSX" in p.parts or e.file_size > MAX_FILE:
                 continue
-            if p.suffix.lower() in SUPPORTED | {".pdf"}:
+            if p.suffix.lower() in SUPPORTED:
                 members.append((str(p), z.read(e)))
         return members
 
@@ -157,15 +159,13 @@ def _read_xls(data: bytes) -> list[list[list]]:
 
 def read_sheets(filename: str, data: bytes) -> list[list[list]]:
     suffix = Path(filename).suffix.lower()
-    if suffix == ".pdf":
-        raise ImportError_("PDF statements aren't supported yet. Download the statement as Excel (XLS/XLSX) or CSV from net banking and upload that.")
     if suffix in {".xlsx", ".xlsm"}:
         return _read_xlsx(data)
     if suffix == ".xls":
         return _read_xls(data)
     if suffix in {".csv", ".txt"}:
         return _read_csv(data)
-    raise ImportError_(f"Unsupported file type {suffix or '(none)'}. Upload CSV, XLS, XLSX or a ZIP of those.")
+    raise ImportError_(f"Unsupported file type {suffix or '(none)'}. Upload PDF, CSV, XLS, XLSX or a ZIP of those.")
 
 
 # ---------- header detection and row mapping ----------
@@ -249,14 +249,41 @@ def extract_rows(rows: list[list], cols: dict[str, int], header_idx: int, kind: 
     return out
 
 
-def parse_statement(filename: str, data: bytes, kind: str) -> tuple[list[dict], list[str]]:
+class Loaded:
+    """A statement read into memory: PDF text/tables or spreadsheet rows, plus text for detection."""
+    def __init__(self, text: str, sheets: list[list[list]] | None = None, tables: list[list] | None = None):
+        self.text, self.sheets, self.tables = text, sheets, tables
+
+
+def load(filename: str, data: bytes, hints: Hints) -> Loaded:
+    if Path(filename).suffix.lower() == ".pdf":
+        try:
+            text, tables = read_pdf(unlock(data, hints))
+        except PdfError as e:
+            raise ImportError_(str(e))
+        return Loaded(text, tables=tables)
+    sheets = read_sheets(filename, data)
+    text = "\n".join(" ".join(str(v) for v in row if v not in (None, "")) for sheet in sheets for row in sheet[:40])
+    return Loaded(text, sheets=sheets)
+
+
+def parse_loaded(loaded: Loaded, kind: str) -> tuple[list[dict], list[str]]:
     warnings: list[str] = []
-    for sheet in read_sheets(filename, data):
+    if loaded.sheets is None:
+        rows = parse_pdf(loaded.text, loaded.tables or [], kind, warnings)
+        if not rows:
+            raise ImportError_("Couldn't find any transactions in this PDF. If it's a statement, please report the bank so its layout can be added.")
+        return rows, warnings
+    for sheet in loaded.sheets:
         header = find_header(sheet)
         if header:
             idx, cols = header
             return extract_rows(sheet, cols, idx, kind, warnings), warnings
     raise ImportError_("Couldn't find a header row with Date, Narration/Description and Debit/Credit (or Amount) columns.")
+
+
+def parse_statement(filename: str, data: bytes, kind: str, hints: Hints | None = None) -> tuple[list[dict], list[str]]:
+    return parse_loaded(load(filename, data, hints or Hints()), kind)
 
 
 # ---------- persistence ----------
@@ -275,8 +302,12 @@ def get_account(db: Session, workspace_id: int, name: str, kind: str) -> Financi
     return account
 
 
-def import_file(db: Session, filename: str, data: bytes, account_name: str, kind: str, workspace_id: int) -> list[dict]:
-    """Import one uploaded file (a ZIP expands to several). Returns one result per statement."""
+def import_file(db: Session, filename: str, data: bytes, account_name: str, kind: str, workspace_id: int, hints: Hints | None = None) -> list[dict]:
+    """Import one uploaded file (a ZIP expands to several). Returns one result per statement.
+
+    With an empty account_name or kind="auto", the account is detected from the statement itself.
+    """
+    hints = hints or Hints()
     filename = PurePosixPath(filename.replace("\\", "/")).name or "upload"
     if len(data) > MAX_FILE:
         return [{"filename": filename, "error": "File exceeds the 50 MB limit"}]
@@ -286,25 +317,39 @@ def import_file(db: Session, filename: str, data: bytes, account_name: str, kind
         except (ImportError_, zipfile.BadZipFile) as e:
             return [{"filename": filename, "error": str(e) or "Not a valid ZIP file"}]
         if not members:
-            return [{"filename": filename, "error": "ZIP contained no CSV/XLS/XLSX statements"}]
+            return [{"filename": filename, "error": "ZIP contained no PDF/CSV/XLS/XLSX statements"}]
         results = []
         for name, content in members:
-            results += import_file(db, f"{filename}:{name}".replace("/", "_"), content, account_name, kind, workspace_id)
+            results += import_file(db, f"{filename}:{name}".replace("/", "_"), content, account_name, kind, workspace_id, hints)
         return results
 
     digest = hashlib.sha256(data).hexdigest()
     existing = db.query(SourceDocument).filter_by(workspace_id=workspace_id, sha256=digest).first()
     if existing:
         return [{"filename": filename, "duplicate": True, "transactions": 0, "message": f"Already imported as {existing.filename}"}]
-    account = get_account(db, workspace_id, account_name, kind)
     try:
-        rows, warnings = parse_statement(filename, data, account.kind)
+        loaded = load(filename, data, hints)
+    except NeedsPassword:
+        tried = "None of the passwords worked. " if not hints.empty else ""
+        return [{"filename": filename, "needs_password": True, "error": f"{tried}This PDF is password-protected. Enter its password to unlock it."}]
     except ImportError_ as e:
         return [{"filename": filename, "error": str(e)}]
     except Exception:
-        return [{"filename": filename, "error": "The file could not be read. Is it a valid, unencrypted CSV/XLS/XLSX?"}]
+        return [{"filename": filename, "error": "The file could not be read. Is it a valid PDF, CSV, XLS or XLSX statement?"}]
+
+    info = detect(loaded.text + "\n" + filename.replace("_", " "))
+    name = account_name.strip() or pdf_account_name(info, re.sub(r"[_-]+", " ", Path(filename).stem).strip()[:120] or "Imported account")
+    known = db.query(FinancialAccount).filter_by(workspace_id=workspace_id, name=name[:120]).first()
+    effective_kind = known.kind if known else kind if kind in {"bank", "card"} else info["kind"] or "bank"
+    try:
+        rows, warnings = parse_loaded(loaded, effective_kind)
+    except ImportError_ as e:
+        return [{"filename": filename, "error": str(e)}]
+    except Exception:
+        return [{"filename": filename, "error": "The file could not be read. Is it a valid PDF, CSV, XLS or XLSX statement?"}]
     if not rows:
         return [{"filename": filename, "error": "No transactions found in the file.", "warnings": warnings}]
+    account = known or get_account(db, workspace_id, name, effective_kind)
 
     # Overlapping statement periods: skip rows already imported for this account from another file.
     seen = Counter(_dedupe_key(t.account_id, t.txn_date, t.narration, t.debit, t.credit)
@@ -312,6 +357,7 @@ def import_file(db: Session, filename: str, data: bytes, account_name: str, kind
     document = SourceDocument(workspace_id=workspace_id, account_id=account.id, sha256=digest, filename=filename[:255])
     db.add(document)
     db.flush()
+    learned = {u.key: u.category for u in db.query(UserRule).filter_by(workspace_id=workspace_id)}
     count = overlap = 0
     for r in rows:
         key = _dedupe_key(account.id, r["date"], r["narration"], r["debit"], r["credit"])
@@ -321,7 +367,7 @@ def import_file(db: Session, filename: str, data: bytes, account_name: str, kind
             continue
         db.add(Transaction(document_id=document.id, account_id=account.id, source_row=r["source_row"], txn_date=r["date"],
                            narration=r["narration"], debit=r["debit"], credit=r["credit"], balance=r["balance"],
-                           category=classify(r["narration"], r["debit"] > 0, account.kind), financial_year=financial_year(r["date"])))
+                           category=classify(r["narration"], r["debit"] > 0, account.kind, learned), financial_year=financial_year(r["date"])))
         count += 1
     if overlap:
         warnings.append(f"Skipped {overlap} row(s) already imported for {account.name} from another statement (overlapping period).")
@@ -330,9 +376,10 @@ def import_file(db: Session, filename: str, data: bytes, account_name: str, kind
     document.warnings = "\n".join(warnings)
     db.add(AuditEvent(workspace_id=workspace_id, action="document_imported", detail=f"{filename}: {count} rows into {account.name}"))
     db.commit()
-    return [{"filename": filename, "duplicate": False, "transactions": count, "account": account.name,
+    return [{"filename": filename, "duplicate": False, "transactions": count, "account": account.name, "kind": account.kind,
+             "document_id": document.id, "account_id": account.id,
              "period": f"{min(dates).isoformat()} to {max(dates).isoformat()}", "warnings": warnings}]
 
 
-def import_path(db: Session, path: Path, account_name: str, kind: str, workspace_id: int) -> list[dict]:
-    return import_file(db, path.name, path.read_bytes(), account_name, kind, workspace_id)
+def import_path(db: Session, path: Path, account_name: str, kind: str, workspace_id: int, hints: Hints | None = None) -> list[dict]:
+    return import_file(db, path.name, path.read_bytes(), account_name, kind, workspace_id, hints)

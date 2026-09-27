@@ -2,7 +2,7 @@
 
 **Turn a year of bank and credit-card statements into a clean, CA-ready ITR working paper, on your own server.**
 
-Every tax season you download statements from four banks, scroll through thousands of rows, and your CA still asks *"what was this ₹2.5 lakh credit in April?"*. LedgerVault does the tedious part. Drop in your statements and it categorises every transaction, cancels out card bill payments and transfers between your own accounts so nothing is counted twice, flags what the tax department is likely to ask about, and hands you an Excel file your CA will actually like.
+Every tax season you download statements from four banks, scroll through thousands of rows, and your CA still asks *"what was this ₹2.5 lakh credit in April?"*. LedgerVault does the tedious part. Drop in all your statements at once (PDF, Excel or CSV, even password-protected ones) and it works out which account each belongs to, categorises every transaction, cancels out card bill payments and transfers between your own accounts so nothing is counted twice, flags what the tax department is likely to ask about, and hands you an Excel file your CA will actually like.
 
 It's self-hosted, so your financial data never leaves your machine or server.
 
@@ -12,8 +12,11 @@ It's self-hosted, so your financial data never leaves your machine or server.
 
 ## What it does for you
 
-- **Understands Indian bank exports.** HDFC, ICICI, SBI, Axis, Kotak and similar CSV/Excel statements work as downloaded. It skips the account-details header block, handles "Withdrawal Amt." / "Deposit Amt." or Amount + Dr/Cr columns, lakh-style numbers, multi-line narrations and footer totals.
-- **Categorises automatically.** Salary, interest, dividends, rent, insurance, investments, EMIs, tax payments, utilities, food, shopping, travel and more. Anything it can't identify (like a UPI transfer to a person) goes to a review queue instead of being guessed.
+- **Just drop everything in.** Mix bank statements and card statements, PDF, Excel and CSV, in one go. Each file is identified as a bank account or credit card from its content and filed under an account like *HDFC Bank Credit Card ••9876*.
+- **Opens password-protected PDFs.** Enter your name, date of birth and PAN once, and it tries the formulas Indian banks use (e.g. `PRIY0512` = first 4 letters of name + DDMM, or PAN + date of birth). If none works, you type that file's password. Your details are never saved on the server.
+- **Understands Indian bank formats.** HDFC, ICICI, SBI, Axis, Kotak, IDFC and others. It skips the account-details header block, handles "Withdrawal Amt." / "Deposit Amt." or Amount + Dr/Cr columns, lakh-style numbers, multi-line narrations and footer totals. For PDFs it uses the running balance to tell debits from credits.
+- **Categorises automatically, and learns.** Salary, interest, dividends (including `ACH C-` NACH payouts and `FINALDIV`/`INTDIV` codes), rent, insurance, investments, EMIs, tax, CRED bill payments, card purchases, cash withdrawals, food, travel and more. Narration codes like `POS`, `NWD`, `ATW`, `UPICashWDL`, `BIL/`, `INF/` and `ACH D-` are understood. Correct one payee and it offers to fix every similar row and remember it for next year.
+- **You confirm before anything counts.** After each upload, a review screen shows the detected accounts and the suggested categories grouped by payee (e.g. "REC LIMITED · 6 credits · Dividend"). Change what's wrong, then click **Confirm all**.
 - **Never double-counts.** Paying your credit-card bill isn't an expense; the purchases on the card are. LedgerVault matches each bank payment to the card statement and does the same for transfers between your own accounts.
 - **Runs an audit for you.** It flags things you'd rather hear from it than from a tax notice:
   - large credits with no clear source
@@ -67,18 +70,18 @@ On the server: `git pull && ./deploy.sh`. From your laptop: `./remote-deploy.sh 
 
 ## Using it
 
-1. **Download statements** for the financial year (1 April to 31 March) as **Excel or CSV**:
+1. **Collect statements** for the financial year (1 April to 31 March). Credit-card e-statement PDFs from your email work as-is. For bank accounts, Excel/CSV is the most reliable, but PDF works too:
 
    | Bank | Where to find it |
    |---|---|
-   | HDFC Bank | NetBanking → Accounts → Account Statement → Download as **XLS** or **Delimited** |
-   | ICICI Bank | Bank Accounts → Account Statement → Download → **XLS** |
-   | SBI | OnlineSBI / YONO → Account Statement → **Excel** |
-   | Axis, Kotak, others | "Account statement" → **Excel/CSV** |
+   | HDFC Bank | NetBanking → Accounts → Account Statement → Download as **XLS**, **Delimited** or **PDF** |
+   | ICICI Bank | Bank Accounts → Account Statement → Download → **XLS** or **PDF** |
+   | SBI | OnlineSBI / YONO → Account Statement → **Excel** or **PDF** |
+   | Axis, Kotak, IDFC, others | "Account statement" → **Excel/CSV/PDF** |
+   | Credit cards | Monthly e-statement PDF from email or the card's app |
 
-   PDF isn't supported yet (see [Roadmap](#roadmap)).
-2. **Upload & statements**: name the account (e.g. *HDFC Savings*), choose **Bank account** or **Credit card**, and drop the files in. Several months or a ZIP at once is fine. Use the same name next time to add to that account.
-3. **Upload your credit-card statements too**, so card bill payments cancel out and the real purchases are counted.
+2. **Upload & statements**: drop all the files in, bank and card together (or a ZIP). If your PDFs are locked, open *Password-protected PDFs?* and enter your name, date of birth and PAN first.
+3. **Review this import**: check that each file landed in the right account (rename it or switch bank/card if needed), fix any category groups highlighted as unidentified, and click **Confirm all**.
 4. **Overview** shows money in and out and the **audit findings** for the year you pick in the sidebar.
 5. **Transactions → Needs attention**: choose a category for each flagged row (or click **Confirm**), and add notes like *"loan from father"* for your CA.
 6. **Reconciliation** shows which card payments and transfers were matched, and what's still missing.
@@ -133,8 +136,10 @@ In short: **`setup.sh` the first time, then `deploy.sh` (on the server) or `remo
 
 | Folder | Contents |
 |---|---|
-| `backend/app/services/ingestion.py` | Reads CSV/XLS/XLSX/ZIP, finds the header row, maps bank column names, parses dates and amounts |
-| `backend/app/services/rules.py` | The categories, their ITR notes, and the narration rules that assign them |
+| `backend/app/services/ingestion.py` | Reads PDF/CSV/XLS/XLSX/ZIP, finds the header row, maps bank column names, parses dates and amounts, and files each statement under an account |
+| `backend/app/services/pdf.py` | Unlocks PDFs, detects bank vs card, the bank and last 4 digits, and extracts transactions from tables or text lines |
+| `backend/app/services/passwords.py` | Builds candidate PDF passwords from your name, date of birth and PAN using common bank formulas |
+| `backend/app/services/rules.py` | The categories, their ITR notes, the narration rules that assign them, and the payee key used for learning |
 | `backend/app/services/reconciliation.py` | Matches card bill payments and self-transfers across accounts |
 | `backend/app/services/report.py` | Year totals, audit findings and the Excel export |
 | `backend/app/main.py` | The HTTP API |
@@ -162,7 +167,7 @@ docker compose exec -T db pg_dump -U ledgervault ledgervault > ledgervault-backu
 
 ## FAQ
 
-**My bank's file says "Couldn't find a header row".**
+**My bank's Excel/CSV says "Couldn't find a header row".**
 The parser looks for a Date column, a Narration/Description column, and Debit/Credit or Amount columns. If your bank names them differently, open an issue with the header row only (no transactions), or add the names to `COLUMNS` in `backend/app/services/ingestion.py`.
 
 **Can my CA log in?**
@@ -170,6 +175,12 @@ Set `ALLOW_REGISTRATION=true`, run `./deploy.sh`, and they can create an account
 
 **Does it work for business or F&O income?**
 It will categorise the bank side, but capital gains, business books and F&O statements are out of scope. Your CA still needs your broker's P&L reports.
+
+**Are my date of birth and PAN stored?**
+No. They're sent with the upload, used to try PDF passwords, and discarded. Nothing is written to the database or logs. If you tick *Remember these on this device*, they're kept only in your own browser.
+
+**A PDF imported with the wrong numbers.**
+PDF layouts vary between banks. Check the warnings under the file on the Upload page (e.g. rows that don't follow the running balance), delete the statement, and upload the Excel/CSV version if your bank offers one. Please report the bank so its layout can be supported.
 
 **What does "Needs attention" mean?**
 Either the category is unclear (UPI or NEFT to a person, an unknown narration), or a card payment or transfer has no matching entry on another uploaded statement.
@@ -193,9 +204,9 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the data model, matching rules and se
 
 ## Roadmap
 
-1. PDF statements, including password-protected ones
+1. Scanned (image-only) statements via OCR
 2. AIS / 26AS / Form 16 import, with bank credits reconciled against AIS
 3. Shared CA access with question threads on individual transactions
 4. Encrypted backups and encryption at rest
 
-Contributions welcome, especially **synthetic** sample statements from banks that aren't recognised yet. Never share real ones.
+Contributions welcome, especially **synthetic** sample statements from banks that aren't recognised yet, and narration patterns that get miscategorised (`backend/app/services/rules.py`, with a test). Never share real statements.

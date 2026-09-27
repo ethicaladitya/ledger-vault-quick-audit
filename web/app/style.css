@@ -102,7 +102,20 @@ legend { font-weight: 700; margin-bottom: 6px; padding: 0; }
 .results li.bad { background: var(--bad-bg); color: var(--bad); }
 .results li.next { padding: 0; }
 .results small { color: var(--muted); }
-.help summary { cursor: pointer; font-weight: 700; }
+.help summary, .subpanel summary { cursor: pointer; font-weight: 700; }
+.subpanel { margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.subpanel[open] summary { margin-bottom: 10px; }
+.subpanel .fields { margin-top: 4px; }
+.hintgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 10px 0; }
+.hintgrid label, .check { display: grid; gap: 6px; font-weight: 700; }
+.check { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+code { background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.results li.locked { background: var(--warn-bg); color: var(--warn); }
+.unlock { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
+.unlock input { flex: 0 1 220px; }
+.unlock small { flex-basis: 100%; }
+.similar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; background: #eef7f2; border: 1px solid var(--accent); padding: 12px 14px; border-radius: 10px; }
+.actions.tight { margin-top: 0; }
 .help ul { line-height: 1.7; padding-left: 20px; margin-bottom: 0; }
 
 /* tables */
@@ -129,10 +142,20 @@ tr.clickable:hover td { background: var(--paper); }
   .content { padding: 20px 16px; }
   .metrics { grid-template-columns: repeat(2, 1fr); }
   .split, .upload .fields { grid-template-columns: 1fr; }
+  .hintgrid { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 520px) {
   header { flex-direction: column; align-items: stretch; }
   h1 { font-size: 26px; }
   .metrics, .metrics.three { grid-template-columns: 1fr; }
   .authbox { padding: 24px; }
+  .hintgrid { grid-template-columns: 1fr; }
 }
+
+.review h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 20px 0 4px; }
+.review .acct { width: 100%; min-width: 200px; padding: 6px 8px; }
+.review select { padding: 6px 8px; font-size: 13px; max-width: 240px; }
+.review select.userset { border-color: var(--accent); background: #f3faf6; }
+.groups tr.undecided td { background: var(--warn-bg); }
+.groups .narr { max-width: 460px; overflow-wrap: anywhere; }
+.review .check { margin-top: 14px; }

@@ -85,22 +85,35 @@ export function Overview({ api, fy, version, refresh, go }: ViewProps) {
 
 // ---------------- Upload & statements ----------------
 
+type Hints = { name: string; dob: string; pan: string; extras: string };
+const HINTS_KEY = "ledger_pdf_hints";
+const emptyHints: Hints = { name: "", dob: "", pan: "", extras: "" };
+
 export function Upload({ api, version, refresh, go }: ViewProps) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [docs, setDocs] = useState<Doc[] | null>(null);
   const [account, setAccount] = useState("");
-  const [kind, setKind] = useState<"bank" | "card">("bank");
+  const [kind, setKind] = useState<"auto" | "bank" | "card">("auto");
   const [files, setFiles] = useState<File[]>([]);
   const [results, setResults] = useState<FileResult[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [drag, setDrag] = useState(false);
+  const [hints, setHints] = useState<Hints>(emptyHints);
+  const [remember, setRemember] = useState(false);
+  const [passwords, setPasswords] = useState<Record<string, string>>({});
+  const sent = useRef<Record<string, File>>({});
+  const [reviewDocs, setReviewDocs] = useState<number[]>([]);
+  const addReview = (rs: FileResult[]) => setReviewDocs(prev => [...prev, ...rs.filter(r => r.document_id).map(r => r.document_id as number)]);
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     api.get<Account[]>("/accounts").then(setAccounts).catch(() => {});
     api.get<Doc[]>("/documents").then(setDocs).catch(() => {});
   }, [api, version]);
+  useEffect(() => {
+    try { const saved = localStorage.getItem(HINTS_KEY); if (saved) { setHints({ ...emptyHints, ...JSON.parse(saved) }); setRemember(true); } } catch {}
+  }, []);
 
   const pickAccount = (name: string) => {
     setAccount(name);
@@ -108,77 +121,118 @@ export function Upload({ api, version, refresh, go }: ViewProps) {
     if (existing) setKind(existing.kind as "bank" | "card");
   };
   const addFiles = (list: FileList | null) => { if (list) setFiles(prev => [...prev, ...Array.from(list)]); };
+  const send = async (batch: File[], password = "") => {
+    const form = new FormData();
+    form.append("account_name", account.trim()); form.append("kind", kind);
+    form.append("name", hints.name); form.append("dob", hints.dob); form.append("pan", hints.pan); form.append("extras", hints.extras);
+    if (password) form.append("password", password);
+    batch.forEach(f => { form.append("files", f); sent.current[f.name] = f; });
+    return (await api.post<{ files: FileResult[] }>("/imports/upload", form)).files;
+  };
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setError("");
     if (!files.length) { setError("Choose at least one statement file."); return; }
+    try { if (remember) localStorage.setItem(HINTS_KEY, JSON.stringify(hints)); else localStorage.removeItem(HINTS_KEY); } catch {}
     setBusy(true);
-    const form = new FormData();
-    form.append("account_name", account.trim()); form.append("kind", kind);
-    files.forEach(f => form.append("files", f));
     try {
-      const r = await api.post<{ files: FileResult[] }>("/imports/upload", form);
-      setResults(r.files); setFiles([]); if (input.current) input.current.value = ""; refresh();
+      const rs = await send(files);
+      setResults(rs); addReview(rs); setFiles([]); if (input.current) input.current.value = ""; refresh();
+    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  };
+  const unlock = async (r: FileResult) => {
+    const file = sent.current[r.filename];
+    if (!file) return;
+    setBusy(true); setError("");
+    try {
+      const [res] = await send([file], passwords[r.filename] ?? "");
+      setResults(list => list.map(x => (x.filename === r.filename ? res : x)));
+      addReview([res]);
+      refresh();
     } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   };
   const remove = async (d: Doc) => {
     if (!confirm(`Delete ${d.filename} and its ${d.transactions} transactions? Your category edits on those rows will be lost.`)) return;
     try { await api.del(`/documents/${d.id}`); refresh(); } catch (err) { setError((err as Error).message); }
   };
+  const locked = results.filter(r => r.needs_password);
+  const setHint = (k: keyof Hints) => (e: React.ChangeEvent<HTMLInputElement>) => setHints(h => ({ ...h, [k]: e.target.value }));
 
   return (
     <>
       <header><div><p className="eyebrow">Evidence</p><h1>Upload statements</h1></div></header>
       <section className="panel">
         <form className="upload" onSubmit={submit}>
-          <div className="fields">
-            <label>Account name
-              <input list="accounts" value={account} onChange={e => pickAccount(e.target.value)} placeholder="e.g. HDFC Savings, ICICI Amazon Pay card" required maxLength={120} />
-              <datalist id="accounts">{accounts.map(a => <option key={a.id} value={a.name} />)}</datalist>
-              <small className="muted">Use the same name each time you add statements for this account.</small>
-            </label>
-            <fieldset>
-              <legend>Account type</legend>
-              <div className="toggle">
-                <button type="button" className={kind === "bank" ? "on" : ""} onClick={() => setKind("bank")}>Bank account</button>
-                <button type="button" className={kind === "card" ? "on" : ""} onClick={() => setKind("card")}>Credit card</button>
-              </div>
-            </fieldset>
-          </div>
           <div className={`drop ${drag ? "drag" : ""}`} onClick={() => input.current?.click()}
             onDragOver={e => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
             onDrop={e => { e.preventDefault(); setDrag(false); addFiles(e.dataTransfer.files); }}>
-            <input ref={input} type="file" multiple accept=".csv,.xls,.xlsx,.zip,.txt" hidden onChange={e => addFiles(e.target.files)} />
-            <b>Drop statement files here, or click to choose</b>
-            <span className="muted">CSV, XLS, XLSX, or a ZIP of them · up to 50 MB each · several months at once is fine</span>
+            <input ref={input} type="file" multiple accept=".pdf,.csv,.xls,.xlsx,.zip,.txt" hidden onChange={e => addFiles(e.target.files)} />
+            <b>Drop all your statements here, or click to choose</b>
+            <span className="muted">PDF, Excel or CSV from any bank or credit card, or a ZIP of them · mix accounts freely · up to 50 MB each</span>
             {files.length > 0 && <ul className="chosen">{files.map((f, i) => <li key={i}>{f.name} <small>({Math.ceil(f.size / 1024)} KB)</small></li>)}</ul>}
           </div>
+          <details className="subpanel" open={locked.length > 0 || undefined}>
+            <summary>Password-protected PDFs? Let LedgerVault try the usual bank passwords</summary>
+            <p className="muted">Banks lock statements with formulas like the first 4 letters of your name + date of birth (<code>PRIY0512</code>), or your PAN + date of birth. Enter your details to try them automatically. They're used only during this upload and never saved on the server.</p>
+            <div className="hintgrid">
+              <label>Name as on statements<input value={hints.name} onChange={setHint("name")} placeholder="Priya Sharma" autoComplete="off" /></label>
+              <label>Date of birth<input type="date" value={hints.dob} onChange={setHint("dob")} /></label>
+              <label>PAN<input value={hints.pan} onChange={setHint("pan")} placeholder="ABCDE1234F" maxLength={10} autoComplete="off" /></label>
+              <label>Card last 4 digits / customer IDs<input value={hints.extras} onChange={setHint("extras")} placeholder="9876, 4521, 50012345" autoComplete="off" /></label>
+            </div>
+            <label className="check"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} /> Remember these on this device only</label>
+          </details>
+          <details className="subpanel">
+            <summary>Account: {account.trim() ? account : "detected automatically"}{kind !== "auto" ? ` · ${kind === "card" ? "credit card" : "bank"}` : ""}</summary>
+            <div className="fields">
+              <label>Account name (optional)
+                <input list="accounts" value={account} onChange={e => pickAccount(e.target.value)} placeholder="Leave blank to detect from each statement" maxLength={120} />
+                <datalist id="accounts">{accounts.map(a => <option key={a.id} value={a.name} />)}</datalist>
+                <small className="muted">Blank: each file is filed under an account like “HDFC Bank Credit Card ••9876”. Set a name to put all these files in one account.</small>
+              </label>
+              <fieldset>
+                <legend>Account type</legend>
+                <div className="toggle">
+                  <button type="button" className={kind === "auto" ? "on" : ""} onClick={() => setKind("auto")}>Detect</button>
+                  <button type="button" className={kind === "bank" ? "on" : ""} onClick={() => setKind("bank")}>Bank</button>
+                  <button type="button" className={kind === "card" ? "on" : ""} onClick={() => setKind("card")}>Credit card</button>
+                </div>
+              </fieldset>
+            </div>
+          </details>
           {error && <p className="error">{error}</p>}
           <div className="actions">
-            <button disabled={busy || !files.length || !account.trim()}>{busy ? "Importing…" : `Import ${files.length || ""} file${files.length === 1 ? "" : "s"}`}</button>
+            <button disabled={busy || !files.length}>{busy ? "Importing…" : `Import ${files.length || ""} file${files.length === 1 ? "" : "s"}`}</button>
             {files.length > 0 && <button type="button" className="secondary" onClick={() => { setFiles([]); if (input.current) input.current.value = ""; }}>Clear</button>}
           </div>
         </form>
         {results.length > 0 && (
           <ul className="results">
             {results.map((r, i) => (
-              <li key={i} className={r.error ? "bad" : r.duplicate ? "dup" : "ok"}>
+              <li key={i} className={r.needs_password ? "locked" : r.error ? "bad" : r.duplicate ? "dup" : "ok"}>
                 <b>{r.filename}</b>
-                <span>{r.error ?? (r.duplicate ? `Skipped: ${r.message ?? "already imported"}` : `${r.transactions} transactions imported into ${r.account} (${r.period})`)}</span>
+                <span>{r.error ?? (r.duplicate ? `Skipped: ${r.message ?? "already imported"}` : `${r.transactions} transactions imported into ${r.account}${r.kind ? ` (${r.kind === "card" ? "credit card" : "bank"})` : ""} · ${r.period}`)}</span>
+                {r.needs_password && (sent.current[r.filename] ? (
+                  <form className="unlock" onSubmit={e => { e.preventDefault(); unlock(r); }}>
+                    <input type="password" placeholder="PDF password" value={passwords[r.filename] ?? ""} onChange={e => setPasswords(p => ({ ...p, [r.filename]: e.target.value }))} autoComplete="off" />
+                    <button disabled={busy}>Unlock</button>
+                    <small>Or fill in your details above and click Unlock to try the usual patterns again.</small>
+                  </form>
+                ) : <small>This file came from a ZIP. Upload the PDF on its own to enter its password.</small>)}
                 {r.warnings?.map((w, j) => <small key={j}>{w}</small>)}
               </li>
             ))}
-            {results.some(r => !r.error && !r.duplicate) && <li className="next"><button className="link" onClick={() => go("transactions", "exceptions")}>Review flagged transactions →</button></li>}
           </ul>
         )}
       </section>
+      {reviewDocs.length > 0 && <ImportReview api={api} docIds={reviewDocs} onDone={() => { setReviewDocs([]); setResults([]); refresh(); go("overview"); }} onChange={refresh} />}
       <details className="panel help">
         <summary>Where do I get these files?</summary>
         <ul>
-          <li><b>HDFC Bank:</b> NetBanking → Accounts → Account Statement → choose the period → Download as <i>XLS</i> or <i>Delimited</i>.</li>
-          <li><b>ICICI Bank:</b> Bank Accounts → Account Statement → choose dates → Download → <i>XLS</i>.</li>
-          <li><b>SBI:</b> YONO / OnlineSBI → Account Statement → choose the period → Download in <i>Excel</i> format.</li>
-          <li><b>Axis / Kotak / others:</b> look for “Account statement” → Excel or CSV. Credit-card portals often offer only PDF; where the card app offers an Excel/CSV export, use that.</li>
-          <li>Password-protected or PDF statements aren't supported yet. Open them and export to Excel, or upload the other accounts for now.</li>
+          <li><b>Credit cards:</b> the monthly e-statement PDF from your email or the card app works as-is, including password-protected ones.</li>
+          <li><b>HDFC Bank:</b> NetBanking → Accounts → Account Statement → choose the period → Download as <i>XLS</i>, <i>Delimited</i> or <i>PDF</i>.</li>
+          <li><b>ICICI Bank:</b> Bank Accounts → Account Statement → choose dates → Download → <i>XLS</i> or <i>PDF</i>.</li>
+          <li><b>SBI:</b> YONO / OnlineSBI → Account Statement → choose the period → <i>Excel</i> or <i>PDF</i>.</li>
+          <li>Excel/CSV is the most reliable where your bank offers it. Scanned (photographed) statements aren't supported.</li>
         </ul>
       </details>
       <section className="panel">
@@ -200,6 +254,85 @@ export function Upload({ api, version, refresh, go }: ViewProps) {
         )}
       </section>
     </>
+  );
+}
+
+// ---------------- Post-upload review ----------------
+
+type ReviewGroup = { key: string; example: string; category: string; direction: "in" | "out"; count: number; total: string; tx_ids: number[]; needs_review: boolean; confirmed: boolean };
+type ReviewStatement = { document_id: number; filename: string; account_id: number; account: string; kind: string; transactions: number; period: string | null };
+
+function ImportReview({ api, docIds, onDone, onChange }: { api: Api; docIds: number[]; onDone: () => void; onChange: () => void }) {
+  const [data, setData] = useState<{ statements: ReviewStatement[]; groups: ReviewGroup[] }>();
+  const [cats, setCats] = useState<Category[]>([]);
+  const [choice, setChoice] = useState<Record<number, string>>({});
+  const [remember, setRemember] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [names, setNames] = useState<Record<number, string>>({});
+  const load = () => api.get<{ statements: ReviewStatement[]; groups: ReviewGroup[] }>(`/imports/review?docs=${docIds.join(",")}`).then(d => { setData(d); setChoice({}); }).catch(e => setError(e.message));
+  useEffect(() => { api.get<Category[]>("/categories").then(setCats).catch(() => {}); }, [api]);
+  useEffect(() => { load(); }, [docIds.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saveAccount = async (s: ReviewStatement, body: { name?: string; kind?: string }) => {
+    setError("");
+    try { await api.patch(`/accounts/${s.account_id}`, body); await load(); onChange(); } catch (e) { setError((e as Error).message); }
+  };
+  const confirmAll = async () => {
+    if (!data) return;
+    setBusy(true); setError("");
+    const groups = data.groups.map((g, i) => {
+      const category = choice[i] ?? g.category;
+      return { tx_ids: g.tx_ids, category, remember_key: remember && g.key && category !== g.category ? g.key : null };
+    });
+    try { await api.post("/imports/confirm", { groups }); onDone(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+  if (!data) return <section className="panel"><div className="empty">Preparing review…</div></section>;
+  const undecided = data.groups.filter((g, i) => g.needs_review && !choice[i]).length;
+
+  return (
+    <section className="panel review">
+      <div className="panelhead"><h2>Review this import</h2><span>{data.groups.reduce((n, g) => n + g.count, 0)} transactions in {data.groups.length} groups</span></div>
+      <p className="muted">Check what was detected, fix anything that's wrong, then confirm. Groups that need a decision are listed first.</p>
+      <h3>Statements</h3>
+      <div className="scroll"><table>
+        <thead><tr><th>File</th><th>Filed under account</th><th>Type</th><th>Period</th><th className="num">Rows</th></tr></thead>
+        <tbody>{data.statements.map(s => (
+          <tr key={s.document_id}>
+            <td>{s.filename}</td>
+            <td><input className="acct" value={names[s.account_id] ?? s.account} onChange={e => setNames(n => ({ ...n, [s.account_id]: e.target.value }))}
+              onBlur={e => e.target.value.trim() && e.target.value !== s.account && saveAccount(s, { name: e.target.value })} /></td>
+            <td><select value={s.kind} onChange={e => saveAccount(s, { kind: e.target.value })}><option value="bank">Bank</option><option value="card">Credit card</option></select></td>
+            <td className="nowrap">{s.period?.replace(" to ", " → ")}</td>
+            <td className="num">{s.transactions}</td>
+          </tr>
+        ))}</tbody>
+      </table></div>
+      <h3>Categories</h3>
+      <div className="scroll"><table className="groups">
+        <thead><tr><th>Payee / description</th><th className="num">Count</th><th className="num">Amount</th><th>Category</th></tr></thead>
+        <tbody>{data.groups.map((g, i) => {
+          const current = choice[i] ?? g.category;
+          return (
+            <tr key={i} className={g.needs_review && !choice[i] ? "undecided" : ""}>
+              <td><b className="narr block">{g.example}</b>{g.count > 1 && <small className="muted">and {g.count - 1} similar</small>}</td>
+              <td className="num">{g.count}</td>
+              <td className={`num nowrap ${g.direction === "out" ? "neg" : "pos"}`}>{g.direction === "out" ? "-" : ""}{money(g.total)}</td>
+              <td><select value={current} onChange={e => setChoice(c => ({ ...c, [i]: e.target.value }))} className={choice[i] ? "userset" : ""}>
+                {cats.map(c => <option key={c.key} value={c.key}>{c.label}</option>)}
+              </select></td>
+            </tr>
+          );
+        })}</tbody>
+      </table></div>
+      {error && <p className="error">{error}</p>}
+      <label className="check"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} /> Remember my changes for future uploads from the same payees</label>
+      <div className="actions">
+        <button onClick={confirmAll} disabled={busy}>{busy ? "Saving…" : "Confirm all"}</button>
+        <button className="secondary" onClick={onDone}>Skip for now</button>
+        {undecided > 0 && <span className="muted">{undecided} group{undecided === 1 ? " is" : "s are"} still “unidentified”. Confirming keeps them as they are.</span>}
+      </div>
+    </section>
   );
 }
 
@@ -232,12 +365,16 @@ export function Transactions({ api, fy, version, initialStatus }: ViewProps & { 
     return () => clearTimeout(t);
   }, [api, fy, version, status, category, account, search, page, tick]);
 
-  const update = async (t: Tx, body: { category?: string; note?: string }) => {
-    setError("");
+  const [similar, setSimilar] = useState<{ tx: Tx; category: string; key: string; count: number } | null>(null);
+  const [flash, setFlash] = useState("");
+  const update = async (t: Tx, body: { category?: string; note?: string; apply_similar?: boolean }) => {
+    setError(""); setFlash("");
     try {
-      const updated = await api.patch<Tx>(`/transactions/${t.id}`, body);
+      const updated = await api.patch<Tx & { similar: { key: string; count: number } | null; applied: number }>(`/transactions/${t.id}`, body);
       setItems(list => list && list.map(x => (x.id === t.id ? updated : x)));
-      if (body.category && status) setTimeout(() => setTick(v => v + 1), 600);
+      if (body.apply_similar) { setSimilar(null); setFlash(`Updated ${updated.applied} similar transaction${updated.applied === 1 ? "" : "s"}. Future uploads from this payee will use this category too.`); setTick(v => v + 1); return; }
+      if (body.category) setSimilar(updated.similar ? { tx: updated, category: body.category, ...updated.similar } : null);
+      if (body.category && status && !updated.similar) setTimeout(() => setTick(v => v + 1), 600);
     } catch (e) { setError((e as Error).message); }
   };
 
@@ -263,6 +400,13 @@ export function Transactions({ api, fy, version, initialStatus }: ViewProps & { 
         </select>
       </div>
       {error && <p className="error">{error}</p>}
+      {similar && (
+        <div className="similar">
+          <span><b>{similar.count}</b> more transaction{similar.count === 1 ? "" : "s"} look like “{similar.key}”. Set them all to <b>{cats.find(c => c.key === similar.category)?.label ?? similar.category}</b> and remember it for future uploads?</span>
+          <span className="actions tight"><button onClick={() => update(similar.tx, { category: similar.category, apply_similar: true })}>Apply to all</button><button className="secondary" onClick={() => { setSimilar(null); if (status) setTick(v => v + 1); }}>Just this one</button></span>
+        </div>
+      )}
+      {flash && <p className="notice">{flash}</p>}
       {status === "exceptions" || status === "needs_review" ? <p className="notice">Pick the right category for each row. Choosing the suggested category again confirms it and clears it from this list.</p> : null}
       <section className="panel">
         <div className="panelhead"><h2>{total} transactions</h2><span>Showing {items?.length ? page * PAGE + 1 : 0}–{page * PAGE + (items?.length ?? 0)}</span></div>

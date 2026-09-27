@@ -16,6 +16,14 @@ LedgerVault stores statement evidence and computes accountant-facing working pap
 
 Readers turn CSV (delimiter sniffed, UTF-8/cp1252), XLSX (openpyxl), XLS (xlrd) and ZIP (validated: no absolute or `..` paths, ≤500 members, ≤250 MB) into rows. The parser scans the first 60 rows for a header containing date, narration and debit/credit or amount columns, using the synonym lists in `COLUMNS`, which cover HDFC, ICICI, SBI, Axis and Kotak style exports. It handles Dr/Cr columns and suffixes, Indian number formats, multi-line narrations, and footer/summary rows. The financial year is derived from each transaction date (April–March). Duplicate files are skipped by hash. Rows already imported for the same account from another file (overlapping periods) are skipped by (date, narration, amount).
 
+## PDFs (`services/pdf.py`, `services/passwords.py`)
+
+`unlock` tries candidate passwords with pikepdf: empty, then passwords the user typed, then formulas built from the name, date of birth, PAN and card/customer numbers supplied with the request. These hints live only in request memory. `read_pdf` (pdfplumber) extracts text and tables; image-only PDFs are rejected. `detect` scores card markers (minimum amount due, credit limit…) against bank markers (IFSC, opening balance…) and finds the institution and last four digits, which gives auto-names like "HDFC Bank Credit Card ••9876". Extraction first tries tables through the spreadsheet header mapper, then parses date-led text lines. For bank statements, the running-balance delta decides debit or credit, and breaks in the balance chain are reported as warnings.
+
+## Post-upload review and learning
+
+`GET /imports/review` groups the uploaded rows by `merchant_key` (the narration with codes, card numbers, references and dates removed) and category. `POST /imports/confirm` marks them user-confirmed and stores `user_rules` for groups the user changed. `PATCH /transactions/{id}` with `apply_similar` does the same for one payee. Learned rules take precedence over built-in rules on later imports. When `RULES_VERSION` changes, rule-categorised rows (never user-set ones) are re-classified on start-up.
+
 ## Classification (`services/rules.py`)
 
 Ordered, direction-aware regex rules map narrations to categories. Each category has a group (income, tax, deduction hint, investment, expense, neutral, review) and an ITR hint. On a card account, payment-like credits are card settlements. User edits set `category_source=user` and are never overwritten.
@@ -34,7 +42,7 @@ Owner registration closes after the first user unless `ALLOW_REGISTRATION=true`.
 
 ## Next milestones
 
-1. PDF statements (text tables first, OCR later) with password support, built from real redacted fixtures.
+1. OCR for scanned statements, and more bank-specific PDF layouts built from redacted fixtures.
 2. AIS / 26AS / Form 16 import and a reconciliation of bank credits against AIS.
 3. CA role with question threads; HttpOnly cookie sessions and CSRF protection.
 4. Encrypted backups, a restore drill, and encryption at rest.
