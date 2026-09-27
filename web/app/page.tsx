@@ -17,6 +17,26 @@ const VIEWS = [
 ] as const;
 export type ViewId = (typeof VIEWS)[number]["id"];
 
+// Sidebar groups and icons (24px stroke icons, drawn inline so no icon library is needed).
+const GROUPS: { title: string; ids: ViewId[] }[] = [
+  { title: "Workspace", ids: ["overview", "upload", "coverage"] },
+  { title: "Ledger", ids: ["transactions", "books", "reconciliation"] },
+  { title: "Output", ids: ["report"] },
+];
+const ICONS: Record<ViewId, string> = {
+  overview: "M3 13h8V3H3zM13 21h8V11h-8zM3 21h8v-6H3zM13 9h8V3h-8z",
+  upload: "M12 16V4M7 9l5-5 5 5M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2",
+  coverage: "M8 2v4M16 2v4M3 9h18M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM8 14l2 2 4-4",
+  transactions: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
+  books: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5zM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5",
+  reconciliation: "M7 7h13l-4-4M17 17H4l4 4",
+  report: "M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6M8 13h8M8 17h5",
+  settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z",
+};
+const Icon = ({ d, size = 18 }: { d: string; size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d={d} /></svg>
+);
+
 export default function Home() {
   // Read the token after mount so server and client render the same markup.
   const [token, setToken] = useState<string | null | undefined>(undefined);
@@ -101,6 +121,8 @@ function Workspace({ token, onLogout }: { token: string; onLogout: () => void })
   const [version, setVersion] = useState(0);
   const [txFilter, setTxFilter] = useState<string>("");
   const [businessMode, setBusinessMode] = useState(false);
+  const [me, setMe] = useState<{ full_name: string; email: string } | null>(null);
+  useEffect(() => { api.get<{ full_name: string; email: string }>("/auth/me").then(setMe).catch(() => {}); }, [api]);
   useEffect(() => { api.get<{ business_mode: boolean }>("/settings").then(s => setBusinessMode(s.business_mode)).catch(() => {}); }, [api]);
 
   useEffect(() => {
@@ -124,13 +146,29 @@ function Workspace({ token, onLogout }: { token: string; onLogout: () => void })
           <span className="eyebrow">Financial year</span>
           <select value={fy} onChange={e => setFy(e.target.value)}>
             {years.length === 0 && <option value="">No data yet</option>}
-            {years.map(y => <option key={y.financial_year} value={y.financial_year}>FY {y.financial_year} ({y.transactions})</option>)}
+            {years.map(y => <option key={y.financial_year} value={y.financial_year}>FY {y.financial_year} · {y.transactions} txns</option>)}
           </select>
         </label>
         <nav>
-          {VIEWS.map(v => <a key={v.id} href={`#${v.id}`} className={view === v.id ? "active" : ""} onClick={e => { e.preventDefault(); go(v.id); }}>{v.label}</a>)}
+          {GROUPS.map(g => (
+            <div key={g.title} className="navgroup">
+              <span className="navtitle">{g.title}</span>
+              {g.ids.map(id => {
+                const v = VIEWS.find(x => x.id === id)!;
+                return <a key={id} href={`#${id}`} className={view === id ? "active" : ""} onClick={e => { e.preventDefault(); go(id); }}><Icon d={ICONS[id]} />{v.label}</a>;
+              })}
+            </div>
+          ))}
         </nav>
-        <div className="privacy">Private workspace<br /><small>Your statements stay on this server. No telemetry.</small><button className="link" onClick={onLogout}>Sign out</button></div>
+        <div className="sidefoot">
+          <a href="#settings" className={view === "settings" ? "active" : ""} onClick={e => { e.preventDefault(); go("settings"); }}><Icon d={ICONS.settings} />Settings</a>
+          <div className="user">
+            <span className="avatar" aria-hidden>{(me?.full_name || "?").trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase()}</span>
+            <span className="who"><b>{me?.full_name ?? "Your workspace"}</b><small>{me?.email ?? "Private"}</small></span>
+            <button className="signout" onClick={onLogout} title="Sign out" aria-label="Sign out"><Icon d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" size={17} /></button>
+          </div>
+          <p className="privacy-note">Private workspace · your statements stay on this server</p>
+        </div>
       </aside>
       <nav className="mobilenav">
         {VIEWS.map(v => <a key={v.id} href={`#${v.id}`} className={view === v.id ? "active" : ""} onClick={e => { e.preventDefault(); go(v.id); }}>{v.label}</a>)}
@@ -147,7 +185,7 @@ function Workspace({ token, onLogout }: { token: string; onLogout: () => void })
         {view === "reconciliation" && <Reconciliation {...props} />}
         {view === "report" && <Report {...props} />}
         {view === "settings" && <Settings {...props} onBusinessMode={setBusinessMode} />}
-        <footer>Tax treatment is provisional until reviewed by your Chartered Accountant. <button className="link inline" onClick={onLogout}>Sign out</button></footer>
+        <footer>Tax treatment is provisional until reviewed by your Chartered Accountant.</footer>
       </section>
     </main>
   );

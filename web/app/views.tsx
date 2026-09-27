@@ -18,9 +18,22 @@ function PurposeSelect({ value, onChange }: { value: string; onChange: (v: strin
 }
 const q = (fy: string) => (fy ? `fy=${encodeURIComponent(fy)}` : "");
 
-function Flags({ flags }: { flags: Flag[] }) {
-  if (!flags.length) return <div className="empty">No findings. Everything uploaded for this year is categorised and matched.</div>;
-  return <ul className="flags">{flags.map((f, i) => <li key={i} className={f.level}><b>{f.title}</b><p>{f.detail}</p></li>)}</ul>;
+function Flags({ flags, limit = 5 }: { flags: Flag[]; limit?: number }) {
+  const [all, setAll] = useState(false);
+  if (!flags.length) return <div className="empty good-empty">✓ No findings. Everything uploaded for this year is categorised and matched.</div>;
+  const ordered = [...flags].sort((a, b) => (a.level === "warning" ? 0 : 1) - (b.level === "warning" ? 0 : 1));
+  const shown = all ? ordered : ordered.slice(0, limit);
+  return (
+    <>
+      <ul className="flags">{shown.map((f, i) => (
+        <li key={i} className={f.level}>
+          <span className="flagicon" aria-hidden>{f.level === "warning" ? "!" : "i"}</span>
+          <div><b>{f.title}</b><p>{f.detail}</p></div>
+        </li>
+      ))}</ul>
+      {ordered.length > limit && <button className="link showmore" onClick={() => setAll(!all)}>{all ? "Show fewer" : `Show all ${ordered.length} findings`}</button>}
+    </>
+  );
 }
 
 function StatusTag({ status }: { status: string }) {
