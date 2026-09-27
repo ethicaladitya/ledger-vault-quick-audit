@@ -24,7 +24,7 @@ function Flags({ flags }: { flags: Flag[] }) {
 }
 
 function StatusTag({ status }: { status: string }) {
-  const good = status === "ok" || status.startsWith("confirmed");
+  const good = status === "ok" || status.startsWith("confirmed") || status === "statement_paid";
   return <span className={`tag ${good ? "good" : ""}`}>{STATUS_LABEL[status] ?? status}</span>;
 }
 
@@ -551,10 +551,10 @@ type AccountLine = { account_id: number; account: string; kind: string; count: n
 
 type CardLine = { account_id: number; account: string; purchases: string; purchase_count: number; refunds: string; payments: string; payment_count: number;
   matched: string; matched_count: number; unmatched: string; unmatched_count: number; cash_payments: string };
-type MissingStatement = { card: string; account_id: number | null; status: "not_uploaded" | "period_missing" | "not_matched"; count: number; amount: string; months: string[];
+type MissingStatement = { card: string; account_id: number | null; status: "not_identified" | "not_uploaded" | "period_missing" | "not_matched"; count: number; amount: string; months: string[];
   payments: { id: number; date: string; bank: string; narration: string; amount: string }[]; message: string };
 type CardRecon = { cards: CardLine[]; missing_statements: MissingStatement[]; unmatched_bank_payments: { id: number; date: string; account: string; narration: string; amount: string }[];
-  unmatched_bank_total: string; total_paid: string; total_purchases: string; cash_paid: string; sft_reportable: boolean };
+  unmatched_bank_total: string; statement_paid_count: number; statement_paid_total: string; total_paid: string; total_purchases: string; cash_paid: string; sft_reportable: boolean };
 
 function CreditCards({ data, go }: { data: CardRecon; go: (v: ViewId, filter?: string) => void }) {
   if (!data.cards.length && !data.unmatched_bank_payments.length) return null;
@@ -577,12 +577,16 @@ function CreditCards({ data, go }: { data: CardRecon; go: (v: ViewId, filter?: s
           ))}</tbody>
         </table></div>
       )}
+      {data.statement_paid_count > 0 && (
+        <p className="muted small-note">{data.statement_paid_count} bill payment{data.statement_paid_count === 1 ? "" : "s"} ({money(data.statement_paid_total)}) paid the total due of an uploaded card statement.
+          Those purchases are already counted; the payment itself shows up on the next statement, which isn't uploaded, so it's matched to the statement instead.</p>
+      )}
       {data.missing_statements.length > 0 && (
         <div className="orphans">
           <b>Missing card statements: the report is incomplete until these are uploaded</b>
           <ul className="missing">{data.missing_statements.map((g, i) => (
             <li key={i}>
-              <div><b>{g.card}</b> <span className="tag">{g.status === "not_uploaded" ? "Not uploaded" : g.status === "period_missing" ? `Missing: ${g.months.join(", ")}` : "Payment not found"}</span></div>
+              <div><b>{g.card}</b> <span className="tag">{g.status === "not_identified" ? `Card unknown: ${g.months.join(", ")}` : g.status === "not_uploaded" ? "Not uploaded" : g.status === "period_missing" ? `Missing: ${g.months.join(", ")}` : "Payment not found"}</span></div>
               <small>{g.count} bill payment{g.count === 1 ? "" : "s"} of {money(g.amount)} from your bank · {g.months.join(", ")}</small>
               <small className="muted block">{g.message}</small>
               <details><summary>Show payments</summary><ul>{g.payments.map(p => <li key={p.id}>{p.date} · {p.bank} · {p.narration} · <b>{money(p.amount)}</b></li>)}</ul></details>
@@ -852,7 +856,7 @@ export function BooksView({ api, fy, version, go, businessMode }: ViewProps) {
             <section className="panel">
               <div className="panelhead"><h2>Left out of the books</h2><span>Money moving between your own accounts</span></div>
               <div className="scroll"><table>
-                <thead><tr><th>What</th><th className="num">Count</th><th className="num">Matched to the other side</th><th className="num">Out</th><th className="num">In</th></tr></thead>
+                <thead><tr><th>What</th><th className="num">Count</th><th className="num">Matched or explained</th><th className="num">Out</th><th className="num">In</th></tr></thead>
                 <tbody>{data.excluded.map(e => (
                   <tr key={e.label}><td><b>{e.label}</b></td><td className="num">{e.count}</td><td className="num">{e.matched} of {e.count}</td>
                     <td className="num nowrap">{Number(e.debit) ? money(e.debit) : "—"}</td><td className="num nowrap">{Number(e.credit) ? money(e.credit) : "—"}</td></tr>

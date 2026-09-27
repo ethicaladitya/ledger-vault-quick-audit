@@ -9,11 +9,17 @@ side of a self-transfer, a BBPS debit that is really a card bill), the row gets
 category_source="link". Those rows go back to their rule category at the start of
 every run, so a link that no longer holds (a statement deleted) leaves nothing behind.
 
-Statuses: ok | needs_review | unmatched | ambiguous | confirmed_settlement | confirmed_transfer
+A card bill payment with no credit on an uploaded card statement is still explained when it pays the total due
+of an uploaded statement of that card: the purchases it paid are on that statement, and its credit is on the next
+one, which may not be uploaded. Such a payment gets status statement_paid and match_group "doc:<document id>".
+
+Statuses: ok | needs_review | unmatched | ambiguous | confirmed_settlement | confirmed_transfer | statement_paid
 """
 from uuid import uuid4
 from sqlalchemy.orm import Session
-from ..models import Transaction, FinancialAccount, AuditEvent, UserRule
+from datetime import timedelta
+from decimal import Decimal
+from ..models import Transaction, FinancialAccount, AuditEvent, UserRule, SourceDocument
 from .rules import MATCHED, NEUTRAL, REVIEW, classify
 from .purpose import apply_purposes
 
@@ -22,6 +28,13 @@ WINDOWS = {"card_settlement": (-2, 7), "own_transfer": (-1, 3)}
 GENERIC = {"bank_transfer", "upi_transfer", "uncategorized"}
 # A card bill paid from the bank often reads as a BBPS / auto-debit / debit-card (CRED via POS) payment.
 CARD_BILL_DEBITS = GENERIC | {"bill_payment", "auto_debit", "card_purchase"}
+# CRED applies a few rupees of coins/cashback (or adds a fee), so the card can receive slightly more or less than
+# the bank sent: up to 1% and ₹50 (at least ₹2).
+STATEMENT_PAY_DAYS = 35  # a statement's bill is paid within this many days of its last transaction
+
+
+def near(a: Decimal, b: Decimal) -> bool:
+    return abs(a - b) <= max(Decimal("2"), min(Decimal("50"), a / 100))
 
 
 def base_status(t: Transaction) -> str:
@@ -34,11 +47,11 @@ def base_status(t: Transaction) -> str:
     return "ok"
 
 
-def _pair(debits: list, credits: list, lo: int, hi: int):
+def _pair(debits: list, credits: list, lo: int, hi: int, same=lambda a, b: a == b):
     """Unique debit↔credit pairs (same amount, other account, credit lo..hi days after the debit), and the debits
     that have several candidates or share their only candidate with another debit."""
     def fits(d, c):
-        return c.account_id != d.account_id and c.credit == d.debit and lo <= (c.txn_date - d.txn_date).days <= hi
+        return c.account_id != d.account_id and same(d.debit, c.credit) and lo <= (c.txn_date - d.txn_date).days <= hi
 
     options = {d.id: [c for c in credits if fits(d, c)] for d in debits}
     reverse: dict[int, int] = {}
@@ -93,6 +106,13 @@ def reconcile(db: Session, workspace_id: int) -> dict:
     for d, c in pairs2:
         _relabel(d, "card_settlement")
         link(d, c, "confirmed_settlement")
+    # Still open on both sides: amounts a few rupees apart (CRED coins or fees).
+    open_bills = [d for d in bank_bills if d.match_group is None]
+    pairs3, _ = _pair(open_bills, [c for c in card_credits if c.match_group is None], -1, 3, near)
+    for d, c in pairs3:
+        link(d, c, "confirmed_settlement")
+    # Then bank payments that pay the total due of an uploaded card statement (its credit is on the next statement).
+    statement_paid = _pay_statements(db, workspace_id, [d for d in bank_bills if d.match_group is None], txns, kind)
     for d in amb:
         if d.match_group is None:
             d.status = "ambiguous"
@@ -112,6 +132,36 @@ def reconcile(db: Session, workspace_id: int) -> dict:
 
     unmatched = sum(t.status == "unmatched" for t in txns)
     apply_purposes(db, workspace_id)
-    db.add(AuditEvent(workspace_id=workspace_id, action="reconciled", detail=f"confirmed={linked}; ambiguous={ambiguous}; unmatched={unmatched}"))
+    db.add(AuditEvent(workspace_id=workspace_id, action="reconciled",
+                      detail=f"confirmed={linked}; statement_paid={statement_paid}; ambiguous={ambiguous}; unmatched={unmatched}"))
     db.commit()
-    return {"confirmed": linked, "ambiguous": ambiguous, "unmatched": unmatched}
+    return {"confirmed": linked, "statement_paid": statement_paid, "ambiguous": ambiguous, "unmatched": unmatched}
+
+
+def _pay_statements(db: Session, workspace_id: int, bills: list, txns: list, kind: dict) -> int:
+    """Link open bank card-bill payments to the uploaded card statement whose total due they pay, when exactly one
+    statement fits the payment and exactly one payment fits the statement."""
+    ends: dict[int, object] = {}
+    for t in txns:
+        if kind[t.id] == "card":
+            ends[t.document_id] = max(ends.get(t.document_id, t.txn_date), t.txn_date)
+    docs = [d for d in db.query(SourceDocument).filter(SourceDocument.workspace_id == workspace_id, SourceDocument.total_due.isnot(None))
+            if d.id in ends]
+
+    def fits(b, doc):
+        # CRED coins can take a few rupees off what the bank pays, never add to it.
+        return (Decimal() <= doc.total_due - b.debit and near(doc.total_due, b.debit)
+                and ends[doc.id] - timedelta(days=1) <= b.txn_date <= ends[doc.id] + timedelta(days=STATEMENT_PAY_DAYS))
+
+    options = {b.id: [d for d in docs if fits(b, d)] for b in bills}
+    takers: dict[int, int] = {}
+    for opts in options.values():
+        for d in opts:
+            takers[d.id] = takers.get(d.id, 0) + 1
+    n = 0
+    for b in bills:
+        opts = options[b.id]
+        if len(opts) == 1 and takers[opts[0].id] == 1:
+            b.match_group, b.status = f"doc:{opts[0].id}", "statement_paid"
+            n += 1
+    return n

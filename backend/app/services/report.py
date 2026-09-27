@@ -130,24 +130,38 @@ def missing_card_statements(rows) -> list[dict]:
             continue
         h = card_hint(t.narration)
         acc = find_account(h)
-        if acc is None:
-            status, key = "not_uploaded", ("n", h["issuer"], h["last4"], None if (h["issuer"] or h["last4"]) else h["via"])
+        if acc is None and not (h["issuer"] or h["last4"]):
+            # CRED/BBPS payments don't say which card: group by month and name the cards with no statement for then.
+            status, key = "not_identified", ("u", h["via"], _month(t.txn_date))
+        elif acc is None:
+            status, key = "not_uploaded", ("n", h["issuer"], h["last4"], None)
         else:
             covered = any(lo - timedelta(days=3) <= t.txn_date <= hi + timedelta(days=7) for lo, hi in coverage.get(acc.id, []))
             status, key = ("not_matched" if covered else "period_missing"), ("a", acc.id, "covered" if covered else "gap")
         covered = [f"{lo.strftime('%d %b %Y')} to {hi.strftime('%d %b %Y')}" for lo, hi in coverage.get(acc.id, [])] if acc else []
         g = groups.setdefault(key, {"card": acc.name if acc else _label(h), "account_id": acc.id if acc else None, "status": status,
-                                    "count": 0, "amount": Decimal(), "months": [], "payments": [], "covered": covered})
+                                    "count": 0, "amount": Decimal(), "months": [], "payments": [], "covered": covered, "via": h["via"]})
         g["count"] += 1
         g["amount"] += t.debit
         if _month(t.txn_date) not in g["months"]:
             g["months"].append(_month(t.txn_date))
         g["payments"].append({"id": t.id, "date": t.txn_date.isoformat(), "bank": a.name, "narration": t.narration, "amount": str(t.debit)})
-    order = {"not_uploaded": 0, "period_missing": 1, "not_matched": 2}
-    out = sorted(groups.values(), key=lambda g: (order[g["status"]], -g["amount"]))
+        if status == "not_identified":
+            # A payment's credit lands on the card statement whose period includes the payment date.
+            missing = [c.name for c in card_accounts.values()
+                       if not any(lo - timedelta(days=3) <= t.txn_date <= hi + timedelta(days=7) for lo, hi in coverage.get(c.id, []))]
+            g.setdefault("uncovered", [])
+            g["uncovered"] += [n for n in missing if n not in g["uncovered"]]
+    order = {"not_identified": 0, "not_uploaded": 1, "period_missing": 2, "not_matched": 3}
+    out = sorted(groups.values(), key=lambda g: (order[g["status"]], g["payments"][0]["date"] if g["status"] == "not_identified" else "", -g["amount"]))
     for g in out:
         g["amount"] = str(g["amount"])
+        uncovered = g.get("uncovered", [])
         g["message"] = {
+            "not_identified": (f"Paid via {g['via'] or 'a bill-pay app'}, which doesn't say which card, and "
+                               "no uploaded card statement shows the payment or a total due it pays. "
+                               + (f"Cards with no statement covering these dates: {', '.join(uncovered)}. Upload those statements, or those of any other card you paid."
+                                  if uncovered else "Every uploaded card has a statement for these dates, so this probably paid a card you haven't uploaded at all.")),
             "not_uploaded": f"No statement uploaded for this card. Upload its statements for {', '.join(g['months'])} so its purchases are counted.",
             "period_missing": (f"This card is uploaded, but not the statement(s) covering {', '.join(g['months'])}. "
                                + (f"Statements uploaded for it cover: {'; '.join(g['covered'])}. " if g["covered"] else "None of its uploaded statements fall in this financial year. ")
@@ -187,8 +201,11 @@ def card_reconciliation(rows) -> dict:
     # Bill payments made from an uploaded bank account to a card whose statement isn't uploaded.
     orphan = [(t, a) for t, a in rows if t.category == "card_settlement" and t.debit > 0 and a.kind == "bank" and not t.match_group]
     orphan_total = sum((t.debit for t, _ in orphan), Decimal())
+    # Paid the total due of an uploaded statement; the credit is on a later statement that isn't uploaded.
+    by_statement = [t for t, a in rows if t.status == "statement_paid" and a.kind == "bank"]
+    statement_paid_total = sum((t.debit for t in by_statement), Decimal())
     card_list = sorted(cards.values(), key=lambda c: c["account"].lower())
-    total_paid = sum((c["payments"] for c in card_list), Decimal()) + orphan_total
+    total_paid = sum((c["payments"] for c in card_list), Decimal()) + orphan_total + statement_paid_total
     cash_total = sum((c["cash_payments"] for c in card_list), Decimal())
     as_str = lambda d: {k: (str(v) if isinstance(v, Decimal) else v) for k, v in d.items()}
     return {
@@ -196,6 +213,7 @@ def card_reconciliation(rows) -> dict:
         "missing_statements": missing_card_statements(rows),
         "unmatched_bank_payments": [{"id": t.id, "date": t.txn_date.isoformat(), "account": a.name, "narration": t.narration, "amount": str(t.debit)} for t, a in orphan],
         "unmatched_bank_total": str(orphan_total),
+        "statement_paid_count": len(by_statement), "statement_paid_total": str(statement_paid_total),
         "total_paid": str(total_paid),
         "total_purchases": str(sum((c["purchases"] for c in card_list), Decimal())),
         "cash_paid": str(cash_total),
@@ -327,7 +345,8 @@ def flags(rows, fy: str | None) -> list[dict]:
     review = [t for t, _ in rows if t.status == "needs_review"]
 
     for g in missing_card_statements(rows):
-        title = {"not_uploaded": f"{g['card']}: statement not uploaded",
+        title = {"not_identified": f"{g['card']}, {', '.join(g['months'])}: no card statement shows it",
+                 "not_uploaded": f"{g['card']}: statement not uploaded",
                  "period_missing": f"{g['card']}: statement missing for {', '.join(g['months'])}",
                  "not_matched": f"{g['card']}: payment not found on the uploaded statement"}[g["status"]]
         add("warning", title, f"{g['count']} bill payment(s) of {inr(Decimal(g['amount']))} from your bank ({', '.join(g['months'])}). {g['message']}")
@@ -515,7 +534,7 @@ def export_xlsx(db: Session, workspace_id: int, fy: str | None, account_id: int 
             for c in cc[cc.max_row]:
                 c.font, c.fill = bold, head_fill
             for g in cr["missing_statements"]:
-                issue = {"not_uploaded": "Statement not uploaded", "period_missing": "Month(s) missing", "not_matched": "Payment not found on statement"}[g["status"]]
+                issue = {"not_identified": "Card not identified", "not_uploaded": "Statement not uploaded", "period_missing": "Month(s) missing", "not_matched": "Payment not found on statement"}[g["status"]]
                 cc.append([g["card"], issue, ", ".join(g["months"]), g["count"], float(g["amount"]), g["message"]])
             cc.append([])
             cc.append(["Date", "Bank account", "Narration", "Amount (₹)", "Card"])

@@ -326,7 +326,11 @@ def test_cred_payments_are_not_pinned_on_the_axis_card(client):
     card = "date,narration,debit,credit\n2025-04-02,AMAZON,5000,\n2025-04-11,PAYMENT RECEIVED THANK YOU,,5000\n"
     upload(client, h, [("bank.csv", bank)], "HDFC Savings")
     upload(client, h, [("axis.csv", card)], "Axis Bank Credit Card ••9534", "card")
-    missing = {g["card"]: g for g in client.get("/report", headers=h).json()["cards"]["missing_statements"]}
-    assert "Axis Bank Credit Card ••9534" not in missing            # its only payment matched the uploaded statement
-    cred = missing["Card not identified (paid via CRED)"]
-    assert cred["count"] == 3 and cred["amount"] == "75000.00"
+    groups = client.get("/report", headers=h).json()["cards"]["missing_statements"]
+    assert not any(g["card"] == "Axis Bank Credit Card ••9534" for g in groups)   # its only payment matched the uploaded statement
+    cred = [g for g in groups if g["card"] == "Card not identified (paid via CRED)"]
+    # One group per month, each naming the uploaded card that has no statement covering that payment.
+    assert [(g["status"], g["months"], g["count"]) for g in cred] == [
+        ("not_identified", ["May 2025"], 1), ("not_identified", ["Jun 2025"], 1), ("not_identified", ["Jul 2025"], 1)]
+    assert sum(float(g["amount"]) for g in cred) == 75000
+    assert all("Axis Bank Credit Card ••9534" in g["message"] for g in cred)

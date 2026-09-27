@@ -311,15 +311,42 @@ def card_totals_check(text: str, rows: list[dict]) -> bool | None:
     transaction lines? True if some pair fits, False if none does, None if the statement prints no summary
     amounts. A payment read as a purchase (or a dropped row) breaks the equation, so this catches what
     a layout change does silently."""
+    fits = _balance_fits(text, rows)
+    return None if fits is None else bool(fits)
+
+
+def _summary_lines(text: str) -> list[str]:
+    return [clean_line(l) for l in text.splitlines() if l.strip() and not re.match(rf"\s*{DATE}", l.strip(), re.I)]
+
+
+def _balance_fits(text: str, rows: list[dict]) -> list[tuple[Decimal, Decimal]] | None:
+    """(previous balance, total due) pairs among the printed summary amounts that the parsed rows reconcile."""
     debits = sum((r["debit"] for r in rows), Decimal())
     credits = sum((r["credit"] for r in rows), Decimal())
-    summary = [clean_line(l) for l in text.splitlines() if l.strip() and not re.match(rf"\s*{DATE}", l.strip(), re.I)]
-    amounts = {abs(_amt(a)) for line in summary for _, a, _ in AMOUNT_TAIL.findall(line)}
+    amounts = {abs(_amt(a)) for line in _summary_lines(text) for _, a, _ in AMOUNT_TAIL.findall(line)}
     if not amounts:
         return None
     tol = Decimal("1.00")
-    return any(abs(prev + debits - credits - due) <= tol or abs(prev + debits - credits + due) <= tol  # a credit balance prints as due
-               for prev in amounts | {Decimal()} for due in amounts)
+    return [(prev, due) for prev in amounts | {Decimal()} for due in amounts
+            if abs(prev + debits - credits - due) <= tol or abs(prev + debits - credits + due) <= tol]  # a credit balance prints as due
+
+
+TOTAL_DUE_LABEL = re.compile(r"total\s*(?:amount\s*)?dues?|amount\s*due|closing\s*balance", re.I)
+
+
+def statement_due(text: str, rows: list[dict]) -> Decimal | None:
+    """The card statement's total amount due, when the parsed rows prove it: the one due amount that previous
+    balance + purchases − payments/credits works out to. A "Total Amount Due" label only breaks ties."""
+    dues = {due for _, due in _balance_fits(text, rows) or [] if due > 0}
+    if len(dues) > 1:
+        lines = _summary_lines(text)
+        labelled = set()
+        for i, line in enumerate(lines):
+            if TOTAL_DUE_LABEL.search(line) and not re.search(r"minimum|min\.? amt", line, re.I):
+                for nearby in lines[i:i + 2]:
+                    labelled |= {abs(_amt(a)) for _, a, _ in AMOUNT_TAIL.findall(nearby)}
+        dues &= labelled
+    return dues.pop() if len(dues) == 1 else None
 
 
 def parse_pdf(content: PdfContent, kind: str, warnings: list[str], diagnostics: dict | None = None) -> list[dict]:
@@ -351,7 +378,8 @@ def parse_pdf(content: PdfContent, kind: str, warnings: list[str], diagnostics: 
     n, name, rows, w, check = best
     if diagnostics is not None:
         diagnostics.update({a[1]: a[0] for a in attempts})
-        diagnostics.update({"pages": content.pages, "date_lines": date_lines, "used": name, "totals_check": check})
+        diagnostics.update({"pages": content.pages, "date_lines": date_lines, "used": name, "totals_check": check,
+                            "total_due": statement_due(content.text, rows) if check else None})
     if not rows:
         return []
     for x in w:

@@ -462,6 +462,15 @@ def reconciliation(fy: str | None = None, db: Session = Depends(get_db), user: U
     for t, a in rows:
         if t.match_group:
             groups.setdefault(t.match_group, []).append(_tx_json(t, a))
+    # A payment of a statement's total due: show the statement where the other leg would be.
+    for gid, group in groups.items():
+        if gid.startswith("doc:"):
+            doc = db.query(SourceDocument).filter_by(id=int(gid[4:]), workspace_id=user.workspace_id).first()
+            card = db.get(FinancialAccount, doc.account_id) if doc else None
+            dates = [d for (d,) in db.query(Transaction.txn_date).filter_by(document_id=doc.id)] if doc else []
+            group.append({"account": card.name if card else "Card statement", "date": max(dates).isoformat() if dates else "",
+                          "narration": f"Pays this statement's total due of {doc.total_due}" + (f" ({min(dates)} to {max(dates)})" if dates else "") if doc else "",
+                          "credit": "0.00", "statement": True})
     return {"matched": [sorted(g, key=lambda x: x["credit"] != "0.00") for g in groups.values()],
             "open": [_tx_json(t, a) for t, a in rows if not t.match_group]}
 

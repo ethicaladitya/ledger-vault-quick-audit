@@ -16,6 +16,7 @@ ADDED_COLUMNS = [
     ("workspaces", "business_mode", "BOOLEAN DEFAULT FALSE NOT NULL"),
     ("financial_accounts", "purpose", "VARCHAR(10) DEFAULT 'mixed' NOT NULL"),
     ("transactions", "purpose_source", "VARCHAR(8) DEFAULT 'rule' NOT NULL"),
+    ("source_documents", "total_due", "NUMERIC(18,2)"),
 ]
 
 

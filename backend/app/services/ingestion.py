@@ -256,6 +256,7 @@ class Loaded:
     """A statement read into memory: PDF text/tables or spreadsheet rows, plus text for detection."""
     def __init__(self, text: str, sheets: list[list[list]] | None = None, pdf=None):
         self.text, self.sheets, self.pdf = text, sheets, pdf
+        self.total_due = None  # card statements: set by parse_loaded when the balances prove it
 
 
 def load(filename: str, data: bytes, hints: Hints) -> Loaded:
@@ -275,6 +276,7 @@ def parse_loaded(loaded: Loaded, kind: str) -> tuple[list[dict], list[str]]:
     if loaded.sheets is None:
         diag: dict = {}
         rows = parse_pdf(loaded.pdf, kind, warnings, diag)
+        loaded.total_due = diag.get("total_due")
         if not rows:
             _log_unreadable_pdf(loaded.pdf, diag)
             detail = (f"{diag.get('pages', '?')} page(s), {diag.get('date_lines', 0)} line(s) starting with a date; found by tables "
@@ -378,7 +380,10 @@ def import_file(db: Session, filename: str, data: bytes, account_name: str, kind
     digest = hashlib.sha256(data).hexdigest()
     existing = db.query(SourceDocument).filter_by(workspace_id=workspace_id, sha256=digest).first()
     if existing:
-        return [{"filename": filename, "duplicate": True, "transactions": 0, "message": f"Already imported as {existing.filename}"}]
+        message = f"Already imported as {existing.filename}"
+        if existing.total_due is None and filename.lower().endswith(".pdf") and _record_total_due(db, existing, filename, data, hints):
+            message += "; its total amount due is now recorded, so bill payments of it can be recognised"
+        return [{"filename": filename, "duplicate": True, "transactions": 0, "message": message}]
     try:
         loaded = load(filename, data, hints)
     except NeedsPassword:
@@ -413,7 +418,8 @@ def import_file(db: Session, filename: str, data: bytes, account_name: str, kind
     # Overlapping statement periods: skip rows already imported for this account from another file.
     seen = Counter(_dedupe_key(t.account_id, t.txn_date, t.narration, t.debit, t.credit)
                    for t in db.query(Transaction).filter_by(account_id=account.id))
-    document = SourceDocument(workspace_id=workspace_id, account_id=account.id, sha256=digest, filename=filename[:255])
+    document = SourceDocument(workspace_id=workspace_id, account_id=account.id, sha256=digest, filename=filename[:255],
+                              total_due=loaded.total_due if account.kind == "card" else None)
     db.add(document)
     db.flush()
     learned = {u.key: u.category for u in db.query(UserRule).filter_by(workspace_id=workspace_id)}
@@ -438,6 +444,24 @@ def import_file(db: Session, filename: str, data: bytes, account_name: str, kind
     return [{"filename": filename, "duplicate": False, "transactions": count, "account": account.name, "kind": account.kind,
              "document_id": document.id, "account_id": account.id,
              "period": f"{min(dates).isoformat()} to {max(dates).isoformat()}", "warnings": warnings}]
+
+
+def _record_total_due(db: Session, doc: SourceDocument, filename: str, data: bytes, hints: Hints) -> bool:
+    """A card statement imported before total dues were kept: read it again for its total due only; rows are untouched."""
+    account = db.get(FinancialAccount, doc.account_id) if doc.account_id else None
+    if not account or account.kind != "card":
+        return False
+    try:
+        loaded = load(filename, data, hints)
+        parse_loaded(loaded, "card")
+    except Exception:
+        return False
+    if loaded.total_due is None:
+        return False
+    doc.total_due = loaded.total_due
+    db.add(AuditEvent(workspace_id=doc.workspace_id, action="document_total_due", detail=f"{doc.filename}: total due recorded"))
+    db.commit()
+    return True
 
 
 def import_path(db: Session, path: Path, account_name: str, kind: str, workspace_id: int, hints: Hints | None = None) -> list[dict]:

@@ -54,6 +54,8 @@ class SourceDocument(Base):
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     row_count: Mapped[int] = mapped_column(Integer, default=0)
     warnings: Mapped[str] = mapped_column(Text, default="")
+    # Card statements: the total due that previous balance + purchases - payments works out to (see pdf.statement_due).
+    total_due: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
 
 
 class Statement(Base):

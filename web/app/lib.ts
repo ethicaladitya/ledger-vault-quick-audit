@@ -19,7 +19,7 @@ export const amountOf = (t: Tx) => (Number(t.debit) > 0 ? -Number(t.debit) : Num
 
 export const STATUS_LABEL: Record<string, string> = {
   ok: "OK", needs_review: "Needs review", unmatched: "Unmatched", ambiguous: "Ambiguous",
-  confirmed_settlement: "Matched", confirmed_transfer: "Matched",
+  confirmed_settlement: "Matched", confirmed_transfer: "Matched", statement_paid: "Pays a statement",
 };
 
 export class ApiError extends Error {
