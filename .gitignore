@@ -9,6 +9,7 @@ backend/.pytest_cache/
 .env
 .env.*
 !.env.example
+.deploy.env
 
 # Keys and personal financial documents must never be committed.
 *.pem

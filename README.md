@@ -69,6 +69,14 @@ Visit `https://ledger.example.com` and create your account. **Sign up straight a
 
 On the server: `git pull && ./deploy.sh`. From your laptop: `./remote-deploy.sh user@server /path/on/server ~/.ssh/key.pem`. Details below.
 
+Tip: put your server details in a private `.deploy.env` next to the script (git-ignored, never uploaded), and then just run `./remote-deploy.sh`:
+
+```sh
+DEPLOY_TARGET=ubuntu@your.server.ip
+DEPLOY_DIR=/home/ubuntu/ledgervault
+DEPLOY_KEY=~/.ssh/your-key.pem
+```
+
 ---
 
 ## Using it
@@ -102,7 +110,7 @@ On the server: `git pull && ./deploy.sh`. From your laptop: `./remote-deploy.sh 
 |---|---|---|
 | **`setup.sh`** | **Once**, on a new machine or server | Installs Docker if it's missing (Ubuntu), creates `.env` with freshly generated random passwords and secrets, then calls `deploy.sh` to start everything. It never overwrites an existing `.env`, so re-running it is safe. |
 | **`deploy.sh`** | **On the server**, every time you update | Rebuilds and restarts the app with `docker compose`, then waits until the API reports healthy and prints `LedgerVault deployed and healthy.`. Your data is kept, and database upgrades run automatically on start. It warns if `SITE_ADDRESS` is missing (meaning no HTTPS). |
-| **`remote-deploy.sh`** | **On your laptop**, to update a server | Copies only the files tracked by git to the server (never `.env`, keys, or personal files lying in the folder), then runs `deploy.sh` there. It refuses to run if the server folder has no `.env` (so it can't start a second, empty copy), if `SITE_ADDRESS` isn't set, or if you have uncommitted changes. Usage: `./remote-deploy.sh ubuntu@1.2.3.4 /home/ubuntu/ledgervault ~/key.pem` |
+| **`remote-deploy.sh`** | **On your laptop**, to update a server | Copies only the files tracked by git to the server (never `.env`, keys, or personal files lying in the folder), then runs `deploy.sh` there. It refuses to run if the server folder has no `.env` (so it can't start a second, empty copy), if `SITE_ADDRESS` isn't set, or if you have uncommitted changes. Usage: `./remote-deploy.sh ubuntu@1.2.3.4 /home/ubuntu/ledgervault ~/key.pem`, or just `./remote-deploy.sh` with a `.deploy.env` |
 
 In short: **`setup.sh` the first time, then `deploy.sh` (on the server) or `remote-deploy.sh` (from your laptop) for every update.**
 

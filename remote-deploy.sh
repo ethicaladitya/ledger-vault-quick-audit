@@ -4,16 +4,25 @@ set -euo pipefail
 # Deploy this checkout to an existing LedgerVault server from your own machine.
 #
 #   ./remote-deploy.sh user@host /path/to/ledgervault/on/server [ssh-key]
+#   ./remote-deploy.sh            (reads DEPLOY_TARGET / DEPLOY_DIR / DEPLOY_KEY from .deploy.env)
 #
 # Copies the files tracked by git with rsync (never .env, keys or local data), then
 # runs ./deploy.sh on the server. The remote folder must already contain the
 # .env created by setup.sh, so this can never start a second, empty stack.
 # For a brand-new server, copy the repo there and run ./setup.sh instead.
+# Server details can live in a private, git-ignored .deploy.env next to this script:
+#   DEPLOY_TARGET=ubuntu@1.2.3.4  DEPLOY_DIR=/home/ubuntu/ledgervault  DEPLOY_KEY=~/.ssh/key.pem
+if [[ $# -lt 2 && -f "$(dirname "${BASH_SOURCE[0]}")/.deploy.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$(dirname "${BASH_SOURCE[0]}")/.deploy.env"
+  set -- "${DEPLOY_TARGET:?set DEPLOY_TARGET in .deploy.env}" "${DEPLOY_DIR:?set DEPLOY_DIR in .deploy.env}" "${DEPLOY_KEY:-}"
+fi
 if [[ $# -lt 2 ]]; then
   sed -n '4,11p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 fi
 target="$1"; remote_dir="$2"; key="${3:-}"
+key="${key/#\~/$HOME}"
 ssh_cmd=(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=6)
 [[ -n "${key}" ]] && ssh_cmd+=(-i "${key}")
 cd "$(dirname "${BASH_SOURCE[0]}")"
