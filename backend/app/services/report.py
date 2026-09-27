@@ -67,12 +67,15 @@ MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "O
 def card_hint(narration: str) -> dict:
     """Which card a bank-side bill payment went to, as far as the narration says: issuer and last 4 digits."""
     low = narration.lower()
+    via = next((name for pattern, name in VIA if re.search(pattern, low)), None)
+    # Bank names inside UPI handles say whose rails carried the payment, not which card was paid:
+    # CRED collects every card bill through cred.club@axisb, so "axis" there means nothing.
+    low = re.sub(r"[\w.\-]+@[\w.\-]+", " ", low)
     # "POS 416021XXXXXX9685 ..." is the debit card that paid (e.g. through CRED), not the credit card being paid.
     paid_by_debit_card = re.match(r"\s*(pos\b|pos-|vps/|ips/)", low) is not None
     m = None if paid_by_debit_card else (re.search(r"(?:x{2,}|\*{2,}|\d{4}[x*]{2,})[x*\d]*?(\d{4})\b", low)
                                          or re.search(r"(?:credit ?card|\bcc\b|\bcard\b)\D{0,25}?(\d{4})\b", low))
     issuer = next((name for pattern, name in ISSUERS if re.search(pattern, low)), None)
-    via = next((name for pattern, name in VIA if re.search(pattern, low)), None)
     return {"issuer": issuer, "last4": m.group(1) if m else None, "via": via}
 
 
@@ -99,6 +102,8 @@ def missing_card_statements(rows) -> list[dict]:
             spans.setdefault((a.id, t.document_id), []).append(t.txn_date)
     for (acc_id, _), dates in spans.items():
         coverage.setdefault(acc_id, []).append((min(dates), max(dates)))
+    for acc_id in coverage:
+        coverage[acc_id].sort()
     from datetime import timedelta
 
     def find_account(h):
@@ -124,8 +129,9 @@ def missing_card_statements(rows) -> list[dict]:
         else:
             covered = any(lo - timedelta(days=3) <= t.txn_date <= hi + timedelta(days=7) for lo, hi in coverage.get(acc.id, []))
             status, key = ("not_matched" if covered else "period_missing"), ("a", acc.id, "covered" if covered else "gap")
+        covered = [f"{lo.strftime('%d %b %Y')} to {hi.strftime('%d %b %Y')}" for lo, hi in coverage.get(acc.id, [])] if acc else []
         g = groups.setdefault(key, {"card": acc.name if acc else _label(h), "account_id": acc.id if acc else None, "status": status,
-                                    "count": 0, "amount": Decimal(), "months": [], "payments": []})
+                                    "count": 0, "amount": Decimal(), "months": [], "payments": [], "covered": covered})
         g["count"] += 1
         g["amount"] += t.debit
         if _month(t.txn_date) not in g["months"]:
@@ -137,7 +143,9 @@ def missing_card_statements(rows) -> list[dict]:
         g["amount"] = str(g["amount"])
         g["message"] = {
             "not_uploaded": f"No statement uploaded for this card. Upload its statements for {', '.join(g['months'])} so its purchases are counted.",
-            "period_missing": f"This card is uploaded, but not the statement(s) covering {', '.join(g['months'])}. Upload them so those purchases are counted.",
+            "period_missing": (f"This card is uploaded, but not the statement(s) covering {', '.join(g['months'])}. "
+                               + (f"Statements uploaded for it cover: {'; '.join(g['covered'])}. " if g["covered"] else "None of its uploaded statements fall in this financial year. ")
+                               + "Upload the missing ones so those purchases are counted."),
             "not_matched": "The statement for this period is uploaded, but no matching payment was found on it. Check the amount, or whether this payment went to a different card.",
         }[g["status"]]
     return out

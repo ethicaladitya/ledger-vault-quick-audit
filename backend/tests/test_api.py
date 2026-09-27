@@ -314,3 +314,19 @@ def test_missing_card_statements_are_named(client):
     titles = [f["title"] for f in client.get("/dashboard", headers=h).json()["flags"]]
     assert "Axis Bank card ••4455: statement not uploaded" in titles
     assert "HDFC Regalia ••9876: statement missing for Jun 2025" in titles
+
+
+def test_cred_payments_are_not_pinned_on_the_axis_card(client):
+    h = signup(client)
+    bank = ("date,narration,debit,credit\n"
+            "2025-05-05,UPI/DR/51234/CRED/cred.club@axisb/Payment,20000,\n"
+            "2025-06-05,UPI/DR/51299/CRED/cred.club@axisb/Payment,25000,\n"
+            "2025-07-05,UPI/DR/51300/CRED/cred.club@axisb/Payment,30000,\n"
+            "2025-04-10,CC PAYMENT AXIS 9534,5000,\n")
+    card = "date,narration,debit,credit\n2025-04-02,AMAZON,5000,\n2025-04-11,PAYMENT RECEIVED THANK YOU,,5000\n"
+    upload(client, h, [("bank.csv", bank)], "HDFC Savings")
+    upload(client, h, [("axis.csv", card)], "Axis Bank Credit Card ••9534", "card")
+    missing = {g["card"]: g for g in client.get("/report", headers=h).json()["cards"]["missing_statements"]}
+    assert "Axis Bank Credit Card ••9534" not in missing            # its only payment matched the uploaded statement
+    cred = missing["Card not identified (paid via CRED)"]
+    assert cred["count"] == 3 and cred["amount"] == "75000.00"
