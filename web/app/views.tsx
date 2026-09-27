@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { money, amountOf, STATUS_LABEL, type Api, type Dash, type Tx, type Category, type Account, type Doc, type FileResult, type Flag, type Books } from "./lib";
+import { money, amountOf, STATUS_LABEL, type Api, type Dash, type Tx, type Category, type Account, type Doc, type FileResult, type Flag, type Books, type Coverage, type CoverageCell } from "./lib";
 import type { ViewId } from "./page";
 
 type ViewProps = { api: Api; fy: string; version: number; refresh: () => void; go: (v: ViewId, filter?: string) => void; businessMode: boolean };
@@ -893,6 +893,63 @@ export function BooksView({ api, fy, version, go, businessMode }: ViewProps) {
             </section>
           )}
         </>
+      )}
+    </>
+  );
+}
+
+// ---------------- Statement coverage ----------------
+
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const COVER_MARK = { ok: "✓", warn: "!", missing: "·" } as const;
+
+export function CoverageView({ api, fy, version, go }: ViewProps) {
+  const [data, setData] = useState<Coverage>();
+  const [error, setError] = useState("");
+  useEffect(() => { api.get<Coverage>(`/coverage?${q(fy)}`).then(setData).catch(e => setError(e.message)); }, [api, fy, version]);
+  const label = (m: string) => { const [y, mm] = m.split("-"); return { mon: MONTH_ABBR[Number(mm) - 1], yr: y.slice(2) }; };
+  const title = (acc: string, m: string, c: CoverageCell) => {
+    const { mon, yr } = label(m);
+    if (!c.statements.length) return `${acc} · ${mon} ${yr}: no statement uploaded`;
+    return `${acc} · ${mon} ${yr}\n` + c.statements.map(s => `${s.from} → ${s.to} · ${s.rows} rows${s.problem ? ` · ${s.problem}` : ""}`).join("\n");
+  };
+  const cards = data?.accounts.filter(a => a.kind === "card") ?? [];
+  const banks = data?.accounts.filter(a => a.kind !== "card") ?? [];
+  const row = (a: Coverage["accounts"][number]) => (
+    <tr key={a.account_id}>
+      <th scope="row" className="covname">{a.account}</th>
+      {data!.months.map(m => {
+        const c = a.months[m];
+        return <td key={m} className={`cov cov-${c.status}`} title={title(a.account, m, c)}>{COVER_MARK[c.status]}</td>;
+      })}
+      <td className="covcount">{a.uploaded}/12</td>
+    </tr>
+  );
+  return (
+    <>
+      <header><div><p className="eyebrow">Uploaded statements {fy && `· FY ${fy}`}</p><h1>Statement coverage</h1></div>
+        <div className="actions tight"><button onClick={() => go("upload")}>Upload statements</button></div></header>
+      {error && <p className="error">{error}</p>}
+      <p className="explain">One row per account, one column per month. A card statement sits in the month its billing cycle ends.
+        <span className="legend"><span className="cov cov-ok">✓</span> uploaded <span className="cov cov-warn">!</span> uploaded, but didn't read cleanly <span className="cov cov-missing">·</span> missing</span></p>
+      {data && (
+        <section className="panel">
+          <div className="scroll"><table className="covgrid">
+            <thead><tr><th />{data.months.map(m => { const { mon, yr } = label(m); return <th key={m}>{mon}<small>{yr}</small></th>; })}<th /></tr></thead>
+            <tbody>
+              {cards.length > 0 && <tr className="covsection"><td colSpan={14}>Credit cards</td></tr>}
+              {cards.map(row)}
+              {banks.length > 0 && <tr className="covsection"><td colSpan={14}>Bank accounts</td></tr>}
+              {banks.map(row)}
+              <tr className="covfoot">
+                <th scope="row" className="covname">Card bills paid, card unknown</th>
+                {data.months.map(m => <td key={m} className={data.unexplained[m] ? "covneed" : ""} title={data.unexplained[m] ? `${data.unexplained[m]} bank payment(s) to a card whose statement isn't uploaded` : ""}>{data.unexplained[m] || ""}</td>)}
+                <td />
+              </tr>
+            </tbody>
+          </table></div>
+          <p className="muted small-note">Hover a cell for the statement's period and how many rows were read. The bottom row counts card bill payments from your bank that no uploaded statement accounts for: upload the missing card statements for those months.</p>
+        </section>
       )}
     </>
   );

@@ -1,13 +1,14 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { makeApi, type Year } from "./lib";
-import { Overview, Upload, Transactions, BooksView, Reconciliation, Report, Settings } from "./views";
+import { Overview, Upload, CoverageView, Transactions, BooksView, Reconciliation, Report, Settings } from "./views";
 import { motion } from "motion/react";
 
 const TOKEN_KEY = "ledger_token";
 const VIEWS = [
   { id: "overview", label: "Overview" },
   { id: "upload", label: "Upload & statements" },
+  { id: "coverage", label: "Statement coverage" },
   { id: "transactions", label: "Transactions" },
   { id: "books", label: "Books" },
   { id: "reconciliation", label: "Reconciliation" },
@@ -130,6 +131,7 @@ function Workspace({ token, onLogout }: { token: string; onLogout: () => void })
       <section className="content">
         {view === "overview" && <Overview {...props} />}
         {view === "upload" && <Upload {...props} />}
+        {view === "coverage" && <CoverageView {...props} />}
         {view === "transactions" && <Transactions {...props} initialStatus={txFilter} />}
         {view === "books" && <BooksView {...props} />}
         {view === "reconciliation" && <Reconciliation {...props} />}

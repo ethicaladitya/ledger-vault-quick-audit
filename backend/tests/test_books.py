@@ -93,3 +93,20 @@ def test_bill_payment_worded_like_a_refund_is_excluded_and_cards_break_down(clie
         ("2000.00", 1, "2400.00", "100.00", "400.00", "2100.00")
     assert [(k["category"], k["amount"]) for k in c["categories"]] == [("dining", "1500.00"), ("shopping", "900.00")]
     assert b["cards"]["paid_total"] == "2000.00" and b["cards"]["unassigned"]["count"] == 0
+
+
+def test_statement_coverage_grid(client):
+    h = signup(client)
+    upload(client, h, [("bank.csv", BANK)], "HDFC Savings")
+    upload(client, h, [("card-apr.csv", CARD)], "HDFC Regalia", "card")
+    upload(client, h, [("card-jun.csv", "date,narration,debit,credit\n2025-05-20,ZOMATO,300,\n2025-06-18,UBER,200,\n")], "HDFC Regalia", "card")
+    cov = client.get("/coverage?fy=2025-26", headers=h).json()
+    assert cov["months"][0] == "2025-04" and cov["months"][-1] == "2026-03" and len(cov["months"]) == 12
+    card = next(a for a in cov["accounts"] if a["account"] == "HDFC Regalia")
+    marks = {m: c["status"] for m, c in card["months"].items()}
+    assert marks["2025-04"] == "ok" and marks["2025-06"] == "ok"      # a statement sits in the month its cycle ends
+    assert marks["2025-05"] == "missing" and card["uploaded"] == 2
+    assert cov["accounts"][0]["account"] == "HDFC Regalia"               # cards first
+    bank = next(a for a in cov["accounts"] if a["kind"] == "bank")
+    assert bank["months"]["2025-04"]["status"] == "ok" and bank["months"]["2025-05"]["status"] == "missing"
+    assert sum(cov["unexplained"].values()) == 0                          # the one bill payment matched

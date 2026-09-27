@@ -68,3 +68,9 @@ export type Books = {
     paid_total: string; spend_total: string; unassigned: { count: number; amount: string };
   };
 };
+export type CoverageCell = { status: "ok" | "warn" | "missing"; statements: { id: number; from: string; to: string; rows: number; total_due: string | null; problem: string | null }[] };
+export type Coverage = {
+  months: string[];
+  accounts: { account_id: number; account: string; kind: string; uploaded: number; months: Record<string, CoverageCell> }[];
+  unexplained: Record<string, number>;
+};

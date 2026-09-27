@@ -221,6 +221,53 @@ def card_reconciliation(rows) -> dict:
     }
 
 
+BAD_READ = ("Doesn't add up", "Only one transaction was read")
+
+
+def statement_coverage(db: Session, workspace_id: int, fy: str | None) -> dict:
+    """Which statements are uploaded, per account and month of the financial year.
+
+    A card statement belongs to the month its cycle ends (its last transaction, about the statement date); a bank
+    statement covers every month from its first to its last transaction. A month is "warn" when its statement
+    didn't read cleanly. `unexplained` counts, per month, bank card-bill payments that no uploaded card explains."""
+    from sqlalchemy import func
+    start = int(fy[:4]) if fy else date.today().year - (1 if date.today().month < 4 else 0)
+    months = [f"{start + (m < 4)}-{m:02d}" for m in [4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3]]
+    accounts = db.query(FinancialAccount).filter_by(workspace_id=workspace_id).all()
+    spans = {doc_id: (lo, hi, n) for doc_id, lo, hi, n in
+             db.query(Transaction.document_id, func.min(Transaction.txn_date), func.max(Transaction.txn_date), func.count(Transaction.id))
+             .group_by(Transaction.document_id)}
+    out = []
+    for a in sorted(accounts, key=lambda a: (a.kind != "card", a.name.lower())):
+        cells: dict[str, dict] = {}
+        for d in db.query(SourceDocument).filter_by(workspace_id=workspace_id, account_id=a.id):
+            if d.id not in spans:
+                continue
+            lo, hi, n = spans[d.id]
+            bad = any(w in (d.warnings or "") for w in BAD_READ)
+            if a.kind == "card":
+                covered = [f"{hi.year}-{hi.month:02d}"]
+            else:
+                covered, y, m = [], lo.year, lo.month
+                while (y, m) <= (hi.year, hi.month):
+                    covered.append(f"{y}-{m:02d}")
+                    y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+            for key in covered:
+                c = cells.setdefault(key, {"status": "ok", "statements": []})
+                c["statements"].append({"id": d.id, "from": lo.isoformat(), "to": hi.isoformat(), "rows": n, "total_due": str(d.total_due) if d.total_due is not None else None,
+                                        "problem": next((w for w in BAD_READ if w in (d.warnings or "")), None)})
+                if bad:
+                    c["status"] = "warn"
+        out.append({"account_id": a.id, "account": a.name, "kind": a.kind,
+                    "months": {m: cells.get(m, {"status": "missing", "statements": []}) for m in months},
+                    "uploaded": sum(1 for m in months if m in cells)})
+    unexplained = defaultdict(int)
+    for t, a in fy_transactions(db, workspace_id, fy):
+        if a.kind == "bank" and t.category == "card_settlement" and t.debit > 0 and not t.match_group:
+            unexplained[f"{t.txn_date.year}-{t.txn_date.month:02d}"] += 1
+    return {"months": months, "accounts": out, "unexplained": {m: unexplained.get(m, 0) for m in months}}
+
+
 def card_breakdown(rows) -> dict:
     """Per credit card: what was paid to it, then what its statements say that money went on.
 
