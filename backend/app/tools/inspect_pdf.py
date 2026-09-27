@@ -11,22 +11,7 @@ On the server:  docker compose cp statement.pdf api:/tmp/s.pdf
 """
 import argparse, re, sys
 
-# Words that describe layout rather than people or merchants; kept as-is.
-KEEP = {w.lower() for w in """date dates time txn transaction transactions details description narration particulars amount amounts
-    cr dr credit debit balance opening closing total due minimum payment payments received statement card number
-    reward rewards points domestic international value ref reference no page of inr rs purchase purchases fee charges gst igst
-    cgst sgst interest limit available cash previous new summary account type billing period from to and the""".split()}
-
-
-def mask(text: str) -> str:
-    text = re.sub(r"(\(cid:\d+\))+", "[icons]", text)  # glyphs without text, e.g. phone/email icons
-    text = re.sub(r"\d", "9", text)
-    def word(m):
-        w = m.group(0)
-        if w.lower() in KEEP or len(w) <= 2:
-            return w
-        return w[0].upper() + "x" * (len(w) - 1) if w[0].isupper() else "x" * len(w)
-    return re.sub(r"[A-Za-z]+", word, text)
+from app.services.masking import mask, layout_sample
 
 
 def main(argv=None):
@@ -60,6 +45,10 @@ def main(argv=None):
     lines = [l for l in text.splitlines() if l.strip()]
     for i, line in enumerate(lines[: args.lines], 1):
         print(f"{i:3} | {show(line)}")
+    from app.services.pdf import DATE
+    print("\n== Lines starting with a date (MASKED, with the line after each) ==")
+    for line in layout_sample(text, DATE, limit=30):
+        print("   " + line)
     print(f"\n== Tables: {len(tables)} rows found by the table extractor ==")
     for row in tables[:15]:
         print("   | " + " | ".join(show(str(c or "")).replace("\n", " ⏎ ") for c in row))

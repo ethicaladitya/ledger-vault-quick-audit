@@ -276,6 +276,7 @@ def parse_loaded(loaded: Loaded, kind: str) -> tuple[list[dict], list[str]]:
         diag: dict = {}
         rows = parse_pdf(loaded.pdf, kind, warnings, diag)
         if not rows:
+            _log_unreadable_pdf(loaded.pdf, diag)
             detail = (f"{diag.get('pages', '?')} page(s), {diag.get('date_lines', 0)} line(s) starting with a date; found by tables "
                       f"{diag.get('tables', 0)}, aligned tables {diag.get('aligned tables', 0)}, text {diag.get('text lines', 0)}, layout {diag.get('layout lines', 0)}")
             raise ImportError_("Couldn't find any transactions in this PDF. Please report the bank and card so its layout can be added. "
@@ -287,6 +288,28 @@ def parse_loaded(loaded: Loaded, kind: str) -> tuple[list[dict], list[str]]:
             idx, cols = header
             return extract_rows(sheet, cols, idx, kind, warnings), warnings
     raise ImportError_("Couldn't find a header row with Date, Narration/Description and Debit/Credit (or Amount) columns.")
+
+
+def _log_unreadable_pdf(content, diag: dict) -> None:
+    """Write the masked layout of a PDF nobody could parse to the API log, so it can be shared to add support."""
+    import logging
+    from .masking import mask, layout_sample
+    from .pdf import DATE
+    log = logging.getLogger("ledgervault.pdf")
+    if not log.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        log.addHandler(handler)
+        log.setLevel(logging.INFO)
+        log.propagate = False
+    lines = ["PDF-LAYOUT-BEGIN (masked: digits->9, words->Xxxx)", f"diagnostics: {diag}", "-- lines starting with a date --"]
+    lines += ["  " + l for l in layout_sample(content.text, DATE)]
+    lines.append("-- first rows of each table --")
+    for i, table in enumerate((content.tables or [])[:8]):
+        for row in table[:3]:
+            lines.append(f"  t{i}: " + " | ".join(mask(str(c or "")).replace("\n", " / ") for c in row))
+    lines.append("PDF-LAYOUT-END")
+    log.info("\n".join(lines))
 
 
 def parse_statement(filename: str, data: bytes, kind: str, hints: Hints | None = None) -> tuple[list[dict], list[str]]:
