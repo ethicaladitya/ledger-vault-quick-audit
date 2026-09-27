@@ -1,0 +1,6 @@
+web/node_modules/
+backend/**/__pycache__/
+*.py[cod]
+.DS_Store
+.env
+
