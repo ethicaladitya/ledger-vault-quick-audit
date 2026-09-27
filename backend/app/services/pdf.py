@@ -158,14 +158,52 @@ def clean_line(raw: str) -> str:
     return " ".join(tokens)
 
 
-def parse_lines(text: str, kind: str, warnings: list[str]) -> list[dict]:
+# Loose reading, used only when the strict one fails (see parse_pdf): amounts may lack paise if they are
+# digit-grouped ("1,250"), and anything after the first amount (reward points, status) is ignored.
+MONEY = rf"(?<![\w,.])(?:{AMT}|\d{{1,3}}(?:,\d{{2,3}})+)(?![\d,.])"
+LOOSE = re.compile(rf"^\s*({DATE})\s+(?:{TIME}\s+)?(?:{DATE}\s+(?:{TIME}\s+)?)?(.*?)\s*([+-]?)\s*({MONEY})\s*(cr|dr|c|d)?\b", re.I)
+
+
+def _loose_match(line: str):
+    m = LOOSE.match(line)
+    if not m:
+        return None
+    amount = m.group(4).replace(",", "")
+    return m.group(1), m.group(2), f"{m.group(3)}{amount if '.' in amount else amount + '.00'} {m.group(5) or ''}".strip()
+
+
+def _joined_lines(text: str) -> list[str]:
+    """Rows whose date, description and amount come out on separate lines: join a date line that has no amount
+    with the lines after it, up to the first one with an amount. Nothing is joined if no amount follows."""
+    raw = [l.strip() for l in text.splitlines()]
+    out, i = [], 0
+    while i < len(raw):
+        head = re.match(rf"{DATE}(?:\s+{TIME})?", raw[i], re.I)
+        if head and not re.search(MONEY, clean_line(raw[i][head.end():])):
+            parts, j = [raw[i]], i + 1
+            while j < len(raw) and len(parts) < 4 and raw[j] and not re.match(DATE, raw[j], re.I):
+                parts.append(raw[j])
+                j += 1
+                if re.search(MONEY, clean_line(parts[-1])):
+                    break
+            if len(parts) > 1 and re.search(MONEY, clean_line(parts[-1])):
+                out.append(" ".join(parts))
+                i = j
+                continue
+        out.append(raw[i])
+        i += 1
+    return out
+
+
+def parse_lines(text: str, kind: str, warnings: list[str], loose: bool = False) -> list[dict]:
     from .ingestion import parse_date
     opening = re.search(rf"opening balance[^\d-]{{0,40}}({AMOUNT})", text, re.I)
     prev_balance = _amt(opening.group(1)) if opening else None
     rows, guessed, broken, extra_lines = [], 0, 0, 0
-    for n, raw in enumerate(text.splitlines(), start=1):
+    for n, raw in enumerate(_joined_lines(text) if loose else text.splitlines(), start=1):
         line = clean_line(raw)
         m = LINE.match(line)
+        m = (m.group(1), m.group(2), m.group(3)) if m else _loose_match(line) if loose else None
         if not m:
             # Wrapped narration: a short text-only line right after a transaction.
             if rows and extra_lines < 2 and line and not re.search(AMOUNT, line) and not re.match(DATE, line) \
@@ -177,8 +215,8 @@ def parse_lines(text: str, kind: str, warnings: list[str]) -> list[dict]:
                 extra_lines = 2
             continue
         extra_lines = 0
-        d = parse_date(m.group(1))
-        narration = re.sub(r"\s+", " ", m.group(2) or "").strip()
+        d = parse_date(m[0])
+        narration = re.sub(r"\s+", " ", m[1] or "").strip()
         narration = re.sub(r"^\d{8,}\s+", "", narration)  # leading transaction/serial reference number
         if kind == "card":
             # Trailing reward points ("30", "+ 12") and a rupee glyph some fonts extract as "C" or "`", in either order.
@@ -191,11 +229,11 @@ def parse_lines(text: str, kind: str, warnings: list[str]) -> list[dict]:
             rows[-1]["narration"] = rows[-1]["narration"][: -len(narration) - 1]
         if d is None or SKIP.search(narration):
             if SKIP.search(narration) and "opening" in narration.lower():
-                amts = AMOUNT_TAIL.findall(m.group(3))
+                amts = AMOUNT_TAIL.findall(m[2])
                 prev_balance = _amt(amts[-1][1]) if amts else prev_balance
             continue
         # A leading "+" marks a credit on card statements (e.g. "+ 5,000.00" for a payment received).
-        amts = [(abs(_amt(a)), (mk or ("cr" if sign == "+" else "")).lower()) for sign, a, mk in AMOUNT_TAIL.findall(m.group(3))]
+        amts = [(abs(_amt(a)), (mk or ("cr" if sign == "+" else "")).lower()) for sign, a, mk in AMOUNT_TAIL.findall(m[2])]
         debit = credit = Decimal("0")
         balance = None
         if kind == "bank" and len(amts) >= 2:
@@ -285,24 +323,35 @@ def card_totals_check(text: str, rows: list[dict]) -> bool | None:
 
 
 def parse_pdf(content: PdfContent, kind: str, warnings: list[str], diagnostics: dict | None = None) -> list[dict]:
-    """Try each extraction method and keep the one that finds the most transactions."""
+    """Try each extraction method and keep the best reading.
+
+    Strict readings (tables, then date-led text lines) come first. The loose text readings (split rows joined,
+    amounts without paise, trailing columns ignored) are used only when the strict ones find fewer than two rows,
+    or, for a card, when a loose reading adds up against the statement's printed balances and no strict one does.
+    Among readings that add up, the one with the most rows wins; otherwise the strict one with the most rows."""
+    methods = [("tables", lambda w: _rows_from_tables(content.tables, kind, w)),
+               ("aligned tables", lambda w: _rows_from_tables(content.text_tables, kind, w)),
+               ("text lines", lambda w: parse_lines(content.text, kind, w)),
+               ("layout lines", lambda w: parse_lines(content.layout_text, kind, w)),
+               ("text lines (loose)", lambda w: parse_lines(content.text, kind, w, loose=True)),
+               ("layout lines (loose)", lambda w: parse_lines(content.layout_text, kind, w, loose=True))]
     attempts = []
-    for name, fn in [("tables", lambda w: _rows_from_tables(content.tables, kind, w)),
-                     ("aligned tables", lambda w: _rows_from_tables(content.text_tables, kind, w)),
-                     ("text lines", lambda w: parse_lines(content.text, kind, w)),
-                     ("layout lines", lambda w: parse_lines(content.layout_text, kind, w))]:
+    for name, fn in methods:
         w: list[str] = []
         try:
             rows = fn(w)
         except Exception:
             rows = []
-        attempts.append((len(rows), name, rows, w))
+        check = card_totals_check(content.text, rows) if kind == "card" and rows else None
+        attempts.append((len(rows), name, rows, w, check))
+    date_lines = sum(1 for line in content.text.splitlines() if re.match(rf"\s*{DATE}", line.strip(), re.I))
+    strict = max((a for a in attempts if "loose" not in a[1]), key=lambda a: a[0])  # ties keep the earliest
+    adds_up = [a for a in attempts if a[4] is True]
+    best = max(adds_up, key=lambda a: a[0]) if adds_up else strict if strict[0] >= 2 else max(attempts, key=lambda a: a[0])
+    n, name, rows, w, check = best
     if diagnostics is not None:
-        diagnostics.update({name: n for n, name, _, _ in attempts})
-        diagnostics["pages"] = content.pages
-        diagnostics["date_lines"] = sum(1 for line in content.text.splitlines() if re.match(rf"\s*{DATE}", line.strip(), re.I))
-    best = max(attempts, key=lambda a: a[0])  # ties keep the earliest (tables before text)
-    n, name, rows, w = best
+        diagnostics.update({a[1]: a[0] for a in attempts})
+        diagnostics.update({"pages": content.pages, "date_lines": date_lines, "used": name, "totals_check": check})
     if not rows:
         return []
     for x in w:
@@ -310,13 +359,12 @@ def parse_pdf(content: PdfContent, kind: str, warnings: list[str], diagnostics: 
             warnings.append(x)
     if "tables" not in name:
         warnings.append("Read from PDF text — compare the imported total with your statement.")
-    if kind == "card":
-        check = card_totals_check(content.text, rows)
-        if diagnostics is not None:
-            diagnostics["totals_check"] = check
-        if check is False:
-            debits, credits = sum((r["debit"] for r in rows), Decimal()), sum((r["credit"] for r in rows), Decimal())
-            warnings.append(f"Doesn't add up: purchases of {debits:,.2f} and payments/credits of {credits:,.2f} read from this statement don't "
-                            "reconcile with its previous balance and total due. Some rows may be missing or have the wrong debit/credit "
-                            "sign; check this statement before relying on it.")
+    if len(rows) == 1 and date_lines > 1:
+        warnings.append("Only one transaction was read from a statement with many dated lines; its layout probably isn't supported yet. "
+                        "Check it before relying on this import.")
+    if check is False:
+        debits, credits = sum((r["debit"] for r in rows), Decimal()), sum((r["credit"] for r in rows), Decimal())
+        warnings.append(f"Doesn't add up: purchases of {debits:,.2f} and payments/credits of {credits:,.2f} read from this statement don't "
+                        "reconcile with its previous balance and total due. Some rows may be missing or have the wrong debit/credit "
+                        "sign; check this statement before relying on it.")
     return _renumber(rows)

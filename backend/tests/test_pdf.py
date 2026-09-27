@@ -2,7 +2,7 @@ from datetime import date
 from decimal import Decimal
 import pytest
 from app.services.passwords import Hints, candidates
-from app.services.pdf import unlock, read_pdf, detect, parse_pdf, account_name, NeedsPassword
+from app.services.pdf import unlock, read_pdf, detect, parse_pdf, account_name, NeedsPassword, PdfContent
 from tests.pdf_fixtures import card_statement, bank_statement, table_statement, encrypt
 from tests.conftest import signup
 
@@ -37,6 +37,30 @@ def test_table_pdf_uses_header_mapping():
     info, rows, _ = parse(table_statement())
     assert info["institution"] == "ICICI Bank"
     assert [(r["debit"], r["credit"]) for r in rows] == [(Decimal("450.00"), 0), (Decimal("2000.00"), 0), (0, Decimal("120.00"))]
+
+
+def test_card_text_fallback_accepts_amount_before_trailing_columns():
+    text = """ICICI Bank Credit Card Statement\nTransaction Date Description Amount Reward Points\n19/01/2026 AMAZON 1,250 125\n20/01/2026 PAYMENT RECEIVED 35,000 CR 0\n"""
+    warnings = []
+    rows = parse_pdf(PdfContent(text=text), "card", warnings)
+    assert len(rows) == 2
+    assert rows[0]["debit"] == Decimal("1250")
+    assert rows[1]["credit"] == Decimal("35000")
+
+
+def test_single_row_from_multi_date_pdf_is_flagged():
+    text = """Credit Card Statement\n01/01/2026 to 31/01/2026\n19/01/2026 PAYMENT 1200.00\n"""
+    warnings = []
+    rows = parse_pdf(PdfContent(text=text), "card", warnings)
+    assert len(rows) == 1
+    assert any(w.startswith("Only one transaction was read") for w in warnings)
+
+
+def test_card_text_fallback_joins_split_visual_columns():
+    text = """Credit Card Statement\n19/01/2026\nONLINE MERCHANT\n1,250.00\n20/01/2026\nSECOND MERCHANT\n800.00\n"""
+    warnings = []
+    rows = parse_pdf(PdfContent(text=text), "card", warnings)
+    assert [r["debit"] for r in rows] == [Decimal("1250.00"), Decimal("800.00")]
 
 
 def test_password_patterns():
