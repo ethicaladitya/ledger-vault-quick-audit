@@ -24,8 +24,10 @@ INSTITUTIONS = [
 ]
 MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
 DATE = rf"(?:\d{{1,2}}[/.-]\d{{1,2}}[/.-]\d{{2,4}}|\d{{1,2}}[ -]{MONTH}[ -,]*\d{{2,4}}|\d{{4}}-\d{{2}}-\d{{2}})"
-AMOUNT = r"-?(?:\d{1,3}(?:,\d{2,3})+|\d+)\.\d{2}"
+AMOUNT = r"-?(?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d{1,2})?"
 LINE = re.compile(rf"^\s*({DATE})\s+(?:{DATE}\s+)?(.*?)\s+((?:{AMOUNT}\s*(?:cr|dr|c|d)?\.?\s*)+)$", re.I)
+DATE_PREFIX = re.compile(rf"^\s*({DATE})(?:\s+({DATE}))?\s+(.*)$", re.I)
+DATE_ONLY = re.compile(rf"^\s*({DATE})\s*$", re.I)
 AMOUNT_TAIL = re.compile(rf"({AMOUNT})\s*(cr|dr|c|d)?\b", re.I)
 SKIP = re.compile(r"opening balance|closing balance|\btotal\b|b/f|c/f|brought forward|carried forward|balance forward", re.I)
 CREDIT_HINT = re.compile(r"\b(salary|interest|int\.?pd|refund|reversal|cashback|dividend|neft cr|imps cr|upi cr|by transfer|deposit|credit|cr)\b", re.I)
@@ -104,15 +106,59 @@ def _amt(s: str) -> Decimal:
     return Decimal(s.replace(",", ""))
 
 
+def _logical_lines(text: str) -> list[str]:
+    """Join PDF text lines when a visually single transaction is split by columns."""
+    raw = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    out: list[str] = []
+    i = 0
+    while i < len(raw):
+        line = raw[i]
+        is_date_start = bool(DATE_PREFIX.match(line) or DATE_ONLY.match(line))
+        if is_date_start and not AMOUNT_TAIL.search(line):
+            parts = [line]
+            j = i + 1
+            while j < len(raw) and len(parts) < 4:
+                nxt = raw[j]
+                if not nxt or DATE_PREFIX.match(nxt) or DATE_ONLY.match(nxt):
+                    break
+                parts.append(nxt)
+                j += 1
+                if AMOUNT_TAIL.search(" ".join(parts)):
+                    break
+            out.append(" ".join(parts))
+            i = j
+            continue
+        out.append(line)
+        i += 1
+    return out
+
+
 def parse_lines(text: str, kind: str, warnings: list[str]) -> list[dict]:
     from .ingestion import parse_date
     opening = re.search(rf"opening balance[^\d-]{{0,40}}({AMOUNT})", text, re.I)
     prev_balance = _amt(opening.group(1)) if opening else None
+    # Card issuers place reward points either before or after the amount.
+    # Preserve the statement's header order when the PDF text has both values.
+    amount_before_points = bool(re.search(r"amount[^\n]{0,80}reward\s+points", text, re.I))
     rows, guessed, broken, extra_lines = [], 0, 0, 0
-    for n, raw in enumerate(text.splitlines(), start=1):
+    for n, raw in enumerate(_logical_lines(text), start=1):
         line = re.sub(r"₹|rs\.?\s|inr\s", " ", raw, flags=re.I).strip()
         m = LINE.match(line)
+        # Some card PDFs expose the columns in visual order but pdfplumber
+        # returns them as: date, description, amount, points/status. The old
+        # parser required every amount to be at the very end, so it rejected
+        # those rows wholesale. This fallback keeps the first monetary token
+        # as the transaction amount and leaves the remaining columns out of
+        # the narration.
+        loose = None
         if not m:
+            prefix = DATE_PREFIX.match(line)
+            if prefix:
+                tail = prefix.group(3)
+                amount_match = re.search(AMOUNT_TAIL, tail)
+                if amount_match:
+                    loose = (prefix.group(1), tail[:amount_match.start()].strip(), tail[amount_match.start():])
+        if not m and not loose:
             # Wrapped narration: a short text-only line right after a transaction.
             if rows and extra_lines < 2 and line and not re.search(AMOUNT, line) and not re.match(DATE, line) \
                     and len(line) < 80 and not re.search(r"page|statement|balance|total|continued", line, re.I):
@@ -122,16 +168,17 @@ def parse_lines(text: str, kind: str, warnings: list[str]) -> list[dict]:
                 extra_lines = 2
             continue
         extra_lines = 0
-        d = parse_date(m.group(1))
-        narration = re.sub(r"\s+", " ", m.group(2)).strip()
+        date_text, narration_text, amount_text = (m.group(1), m.group(2), m.group(3)) if m else loose
+        d = parse_date(date_text)
+        narration = re.sub(r"\s+", " ", narration_text).strip()
         if kind == "card":
             narration = re.sub(r"\s+\d{1,5}$", "", narration)  # trailing reward-points column
         if d is None or SKIP.search(narration):
             if SKIP.search(narration) and "opening" in narration.lower():
-                amts = AMOUNT_TAIL.findall(m.group(3))
+                amts = AMOUNT_TAIL.findall(amount_text)
                 prev_balance = _amt(amts[-1][0]) if amts else prev_balance
             continue
-        amts = [(abs(_amt(a)), (mk or "").lower()) for a, mk in AMOUNT_TAIL.findall(m.group(3))]
+        amts = [(abs(_amt(a)), (mk or "").lower()) for a, mk in AMOUNT_TAIL.findall(amount_text)]
         debit = credit = Decimal("0")
         balance = None
         if kind == "bank" and len(amts) >= 2:
@@ -154,7 +201,13 @@ def parse_lines(text: str, kind: str, warnings: list[str]) -> list[dict]:
                 broken += 1
             prev_balance = balance
         else:
-            amount, marker = amts[-1]
+            marked = next((item for item in amts if item[1] in ("cr", "c", "dr", "d")), None)
+            if marked:
+                amount, marker = marked
+            elif kind == "card" and amount_before_points and len(amts) > 1:
+                amount, marker = amts[0]
+            else:
+                amount, marker = amts[-1]
             if marker in ("cr", "c"):
                 credit = amount
             elif marker in ("dr", "d") or kind == "card":
@@ -189,4 +242,6 @@ def parse_pdf(text: str, tables: list[list], kind: str, warnings: list[str]) -> 
     rows = parse_lines(text, kind, warnings)
     if rows:
         warnings.append("Read from PDF text — compare the imported total with your statement.")
+        if len(rows) == 1 and len(re.findall(DATE, text, re.I)) > 1:
+            warnings.append("Only one transaction row was extracted from a multi-date PDF — review the statement before relying on this import.")
     return rows

@@ -272,7 +272,7 @@ def parse_loaded(loaded: Loaded, kind: str) -> tuple[list[dict], list[str]]:
     if loaded.sheets is None:
         rows = parse_pdf(loaded.text, loaded.tables or [], kind, warnings)
         if not rows:
-            raise ImportError_("Couldn't find any transactions in this PDF. If it's a statement, please report the bank so its layout can be added.")
+            raise ImportError_("The PDF text was readable, but no transaction rows matched its layout. This statement needs a bank/card-specific parser; no rows were imported.")
         return rows, warnings
     for sheet in loaded.sheets:
         header = find_header(sheet)
