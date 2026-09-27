@@ -30,7 +30,7 @@ COLUMNS = {
 }
 DEBIT_MARKERS = {"d", "dr", "debit", "withdrawal", "db"}
 CREDIT_MARKERS = {"c", "cr", "credit", "deposit"}
-DATE_FORMATS = ["%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y", "%d.%m.%Y", "%d.%m.%y", "%d %b %Y", "%d-%b-%Y", "%d-%b-%y", "%d %b %y", "%d %B %Y", "%d-%B-%Y", "%b %d, %Y", "%Y/%m/%d", "%d/%b/%Y"]
+DATE_FORMATS = ["%B %d, %Y", "%b %d %Y", "%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y", "%d.%m.%Y", "%d.%m.%y", "%d %b %Y", "%d-%b-%Y", "%d-%b-%y", "%d %b %y", "%d %B %Y", "%d-%B-%Y", "%b %d, %Y", "%Y/%m/%d", "%d/%b/%Y"]
 
 
 class ImportError_(ValueError):
@@ -44,8 +44,8 @@ def financial_year(d: date) -> str:
 
 def _norm_header(value) -> str:
     text = str(value or "").lower().replace("\n", " ")
-    text = re.sub(r"\((inr|rs\.?|₹)\s*\)|\binr\b|₹|rs\.", " ", text)
-    text = re.sub(r"[.:_*]", " ", text)
+    text = re.sub(r"\(\s*(in\s*)?(inr|rs\.?|₹|`)?\s*\)|\binr\b|₹|`|rs\.", " ", text)
+    text = re.sub(r"[.:_*#]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -187,7 +187,7 @@ def _match_columns(row: list) -> dict[str, int]:
 
 
 def find_header(rows: list[list]) -> tuple[int, dict[str, int]] | None:
-    for i, row in enumerate(rows[:60]):
+    for i, row in enumerate(rows[:200]):
         cols = _match_columns(row)
         if "date" in cols and "narration" in cols and ({"debit", "credit"} & cols.keys() or "amount" in cols):
             return i, cols
@@ -225,8 +225,11 @@ def extract_rows(rows: list[list], cols: dict[str, int], header_idx: int, kind: 
             amount = dec(raw)
             marker = re.sub(r"[^a-z]", "", str(_cell(row, cols.get("drcr")) or "").lower())
             marker = marker if marker in DEBIT_MARKERS | CREDIT_MARKERS else ""
-            if not marker and isinstance(raw, str) and re.search(r"\b(cr|dr)\.?\s*$", raw, re.I):
-                marker = re.search(r"\b(cr|dr)\.?\s*$", raw, re.I).group(1).lower()
+            suffix = re.search(r"\b(cr|dr|c|d)\.?\s*$", raw.strip(), re.I) if isinstance(raw, str) else None
+            if not marker and suffix:
+                marker = {"c": "cr", "d": "dr"}.get(suffix.group(1).lower(), suffix.group(1).lower())
+            if not marker and isinstance(raw, str) and raw.strip().startswith("+"):
+                marker = "cr"  # "+ 5,000.00" marks a credit on card statements
             if marker in DEBIT_MARKERS:
                 debit, credit = abs(amount), Decimal("0")
             elif marker in CREDIT_MARKERS:
@@ -251,17 +254,17 @@ def extract_rows(rows: list[list], cols: dict[str, int], header_idx: int, kind: 
 
 class Loaded:
     """A statement read into memory: PDF text/tables or spreadsheet rows, plus text for detection."""
-    def __init__(self, text: str, sheets: list[list[list]] | None = None, tables: list[list] | None = None):
-        self.text, self.sheets, self.tables = text, sheets, tables
+    def __init__(self, text: str, sheets: list[list[list]] | None = None, pdf=None):
+        self.text, self.sheets, self.pdf = text, sheets, pdf
 
 
 def load(filename: str, data: bytes, hints: Hints) -> Loaded:
     if Path(filename).suffix.lower() == ".pdf":
         try:
-            text, tables = read_pdf(unlock(data, hints))
+            content = read_pdf(unlock(data, hints))
         except PdfError as e:
             raise ImportError_(str(e))
-        return Loaded(text, tables=tables)
+        return Loaded(content.text, pdf=content)
     sheets = read_sheets(filename, data)
     text = "\n".join(" ".join(str(v) for v in row if v not in (None, "")) for sheet in sheets for row in sheet[:40])
     return Loaded(text, sheets=sheets)
@@ -270,9 +273,13 @@ def load(filename: str, data: bytes, hints: Hints) -> Loaded:
 def parse_loaded(loaded: Loaded, kind: str) -> tuple[list[dict], list[str]]:
     warnings: list[str] = []
     if loaded.sheets is None:
-        rows = parse_pdf(loaded.text, loaded.tables or [], kind, warnings)
+        diag: dict = {}
+        rows = parse_pdf(loaded.pdf, kind, warnings, diag)
         if not rows:
-            raise ImportError_("Couldn't find any transactions in this PDF. If it's a statement, please report the bank so its layout can be added.")
+            detail = (f"{diag.get('pages', '?')} page(s), {diag.get('date_lines', 0)} line(s) starting with a date; found by tables "
+                      f"{diag.get('tables', 0)}, aligned tables {diag.get('aligned tables', 0)}, text {diag.get('text lines', 0)}, layout {diag.get('layout lines', 0)}")
+            raise ImportError_("Couldn't find any transactions in this PDF. Please report the bank and card so its layout can be added. "
+                               f"(Diagnostics: {detail}.)")
         return rows, warnings
     for sheet in loaded.sheets:
         header = find_header(sheet)

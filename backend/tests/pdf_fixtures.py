@@ -71,3 +71,41 @@ def encrypt(data: bytes, password: str) -> bytes:
     with pikepdf.open(io.BytesIO(data)) as pdf:
         pdf.save(out, encryption=pikepdf.Encryption(user=password, owner=password + "-owner", R=6))
     return out.getvalue()
+
+
+def icici_card_statement() -> bytes:
+    """Shaped like the masked ICICI output: ruled transaction table with a ` rupee header, an EMI
+    summary table below it, and the transaction table continuing on page 2 without a header."""
+    from reportlab.platypus import PageBreak
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4)
+    style = TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black), ("FONTSIZE", (0, 0), (-1, -1), 7)])
+    head = ["Date", "Ser. No.", "Transaction Details", "Reward\nPoints", "Intl.#\namount", "Amount (in`)"]
+    page1 = [head,
+             ["05/09/2025", "11223344556", "BBPS Payment received", "0", "", "12,000.00 CR"],
+             ["07/09/2025", "11223344557", "AMAZON PAY INDIA BANGALORE IN", "40", "", "2,499.00"],
+             ["09/09/2025", "11223344558", "SWIGGY BANGALORE IN", "6", "", "640.50"]]
+    page2 = [["12/09/2025", "11223344559", "IRCTC NEW DELHI IN", "20", "", "1,845.00"],
+             ["15/09/2025", "11223344560", "REFUND FLIPKART", "0", "", "499.00 CR"]]
+    emi = [["SL. No", "Transaction", "₹"], ["1", "Purchase on Sep 12, 2025", "9,999"], ["2", "Total Amount Due on statement dated Oct 01, 2025", "4,322"]]
+    p = getSampleStyleSheet()["Normal"]
+    t1, t2, t3 = Table(page1), Table(page2), Table(emi)
+    for t in (t1, t2, t3):
+        t.setStyle(style)
+    doc.build([Paragraph("ICICI Bank Credit Card Statement - Card 4854XXXXXXXXXX45 - Minimum Amount due - Credit Limit", p), t1,
+               PageBreak(), t2, Paragraph("EMI summary", p), t3])
+    return buf.getvalue()
+
+
+def hdfc_new_card_statement() -> bytes:
+    """Newer HDFC-style text layout: date | time, rupee sign, '+' for credits, 'C' suffix, no ruling."""
+    return _text_pdf([
+        "HDFC Bank Credit Card Statement   Card No: 6529 XXXX XXXX 1047",
+        "Total Amount Due  Minimum Amount Due  Credit Limit  Payment Due Date",
+        "DATE & TIME          TRANSACTION DESCRIPTION              REWARDS     AMOUNT",
+        "02/10/2025| 13:45    ZOMATO GURGAON                        + 12      Rs. 1,240.00",
+        "05/10/2025| 09:10    NETFLIX.COM MUMBAI                    + 6       Rs. 649.00",
+        "08/10/2025| 18:22    PAYMENT RECEIVED - NETBANKING                   + Rs. 25,000.00",
+        "11/10/2025| 20:01    UBER INDIA SYSTEMS BANGALORE          + 3       Rs. 312.40",
+        "14/10/2025| 11:11    REVERSAL ZOMATO                                 Rs. 240.00 C",
+    ])

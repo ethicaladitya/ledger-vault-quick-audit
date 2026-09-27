@@ -6,6 +6,7 @@ amounts. For bank statements the running balance decides whether a row is a
 debit or a credit, and a broken balance chain is reported as a warning.
 """
 import io, re
+from dataclasses import dataclass, field
 from decimal import Decimal
 from .passwords import Hints, candidates
 
@@ -23,10 +24,14 @@ INSTITUTIONS = [
     (r"\bhsbc\b", "HSBC"), (r"citi\s*bank|citibank", "Citibank"), (r"onecard|one\s*card", "OneCard"), (r"hdfc", "HDFC Bank"),
 ]
 MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*"
-DATE = rf"(?:\d{{1,2}}[/.-]\d{{1,2}}[/.-]\d{{2,4}}|\d{{1,2}}[ -]{MONTH}[ -,]*\d{{2,4}}|\d{{4}}-\d{{2}}-\d{{2}})"
-AMOUNT = r"-?(?:\d{1,3}(?:,\d{2,3})+|\d+)\.\d{2}"
-LINE = re.compile(rf"^\s*({DATE})\s+(?:{DATE}\s+)?(.*?)\s+((?:{AMOUNT}\s*(?:cr|dr|c|d)?\.?\s*)+)$", re.I)
-AMOUNT_TAIL = re.compile(rf"({AMOUNT})\s*(cr|dr|c|d)?\b", re.I)
+DATE = rf"(?:\d{{1,2}}[/.-]\d{{1,2}}[/.-]\d{{2,4}}|\d{{1,2}}[ -]{MONTH}[ -,]*\d{{2,4}}|\d{{4}}-\d{{2}}-\d{{2}}|{MONTH}\s+\d{{1,2}},?\s+\d{{4}})"
+TIME = r"\d{1,2}:\d{2}(?::\d{2})?(?:\s*[ap]m)?"
+AMT = r"(?:\d{1,3}(?:,\d{2,3})+|\d+)\.\d{2}"
+AMOUNT = rf"-?{AMT}"
+# date [time] [value date [time]] narration amounts...  (amounts may carry +/- and a Cr/Dr/C/D marker)
+LINE = re.compile(rf"^\s*({DATE})\s+(?:{TIME}\s+)?(?:{DATE}\s+(?:{TIME}\s+)?)?(.*?)\s+((?:[+-]?\s*{AMT}\s*(?:cr|dr|c|d)?\.?\s*)+)$", re.I)
+AMOUNT_TAIL = re.compile(rf"([+-]?)\s*({AMT})\s*(cr|dr|c|d)?\b", re.I)
+CURRENCY = re.compile(r"₹|`|\brs\.?(?=\s|\d)|\binr\b|\|", re.I)
 SKIP = re.compile(r"opening balance|closing balance|\btotal\b|b/f|c/f|brought forward|carried forward|balance forward", re.I)
 CREDIT_HINT = re.compile(r"\b(salary|interest|int\.?pd|refund|reversal|cashback|dividend|neft cr|imps cr|upi cr|by transfer|deposit|credit|cr)\b", re.I)
 
@@ -57,18 +62,39 @@ def unlock(data: bytes, hints: Hints) -> bytes:
     raise NeedsPassword()
 
 
-def read_pdf(data: bytes) -> tuple[str, list[list]]:
+@dataclass
+class PdfContent:
+    """Everything extracted from a PDF. Tables are kept separate: joining rows across tables glued
+    unrelated summary rows (EMI tables, reward points) onto the last transaction."""
+    text: str
+    tables: list[list[list]] = field(default_factory=list)       # ruled tables, one list of rows per table
+    text_tables: list[list[list]] = field(default_factory=list)  # tables found by column alignment (no ruling)
+    layout_text: str = ""                                        # text with column spacing preserved
+    pages: int = 0
+
+
+def read_pdf(data: bytes) -> PdfContent:
     import pdfplumber
-    texts, tables = [], []
+    content = PdfContent(text="")
+    texts, layouts = [], []
     with pdfplumber.open(io.BytesIO(data)) as pdf:
+        content.pages = len(pdf.pages)
         for page in pdf.pages[:300]:
             texts.append(page.extract_text() or "")
-            for t in page.extract_tables():
-                tables.extend(t)
-    text = "\n".join(texts)
-    if len(re.sub(r"\s", "", text)) < 40:
+            try:
+                layouts.append(page.extract_text(layout=True) or "")
+            except Exception:
+                pass
+            content.tables += [t for t in page.extract_tables() if t]
+            try:
+                content.text_tables += [t for t in page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"}) if t]
+            except Exception:
+                pass
+    content.text = "\n".join(texts)
+    content.layout_text = "\n".join(layouts)
+    if len(re.sub(r"\s", "", content.text)) < 40:
         raise PdfError("This looks like a scanned image PDF. Scanned statements aren't supported yet; download the e-statement or Excel version instead.")
-    return text, tables
+    return content
 
 
 def detect(text: str) -> dict:
@@ -83,6 +109,8 @@ def detect(text: str) -> dict:
     last4 = None
     if kind == "card":
         m = re.search(r"(?:\d{4}|[x*•]{4})[ -]?(?:[\dx*•]{2,4})[ -]?[x*•]{2,4}[ -]?[x*•]{0,4}[ -]?(\d{4})\b", low)
+        # Some issuers (ICICI) print only the last 2 digits: 4854XXXXXXXXXX45
+        m = m or re.search(r"\b\d{4}[x*•]{6,12}(\d{2,4})\b", low)
         last4 = m.group(1) if m else None
     else:
         m = re.search(r"(?:a/?c|account)\s*(?:no|number|num)?\.?\s*:?\s*([x*\d]{6,20})", low)
@@ -110,7 +138,7 @@ def parse_lines(text: str, kind: str, warnings: list[str]) -> list[dict]:
     prev_balance = _amt(opening.group(1)) if opening else None
     rows, guessed, broken, extra_lines = [], 0, 0, 0
     for n, raw in enumerate(text.splitlines(), start=1):
-        line = re.sub(r"₹|rs\.?\s|inr\s", " ", raw, flags=re.I).strip()
+        line = re.sub(r"\s+", " ", CURRENCY.sub(" ", raw)).strip()
         m = LINE.match(line)
         if not m:
             # Wrapped narration: a short text-only line right after a transaction.
@@ -124,14 +152,16 @@ def parse_lines(text: str, kind: str, warnings: list[str]) -> list[dict]:
         extra_lines = 0
         d = parse_date(m.group(1))
         narration = re.sub(r"\s+", " ", m.group(2)).strip()
+        narration = re.sub(r"^\d{8,}\s+", "", narration)  # leading transaction/serial reference number
         if kind == "card":
-            narration = re.sub(r"\s+\d{1,5}$", "", narration)  # trailing reward-points column
+            narration = re.sub(r"(\s+[+-]?\s?\d{1,5})+$", "", narration)  # trailing reward-points column ("30", "+ 12")
         if d is None or SKIP.search(narration):
             if SKIP.search(narration) and "opening" in narration.lower():
                 amts = AMOUNT_TAIL.findall(m.group(3))
-                prev_balance = _amt(amts[-1][0]) if amts else prev_balance
+                prev_balance = _amt(amts[-1][1]) if amts else prev_balance
             continue
-        amts = [(abs(_amt(a)), (mk or "").lower()) for a, mk in AMOUNT_TAIL.findall(m.group(3))]
+        # A leading "+" marks a credit on card statements (e.g. "+ 5,000.00" for a payment received).
+        amts = [(abs(_amt(a)), (mk or ("cr" if sign == "+" else "")).lower()) for sign, a, mk in AMOUNT_TAIL.findall(m.group(3))]
         debit = credit = Decimal("0")
         balance = None
         if kind == "bank" and len(amts) >= 2:
@@ -175,18 +205,56 @@ def parse_lines(text: str, kind: str, warnings: list[str]) -> list[dict]:
     return rows
 
 
-def parse_pdf(text: str, tables: list[list], kind: str, warnings: list[str]) -> list[dict]:
+def _rows_from_tables(tables: list[list[list]], kind: str, warnings: list[str]) -> list[dict]:
+    """Map each table with its own header; a header-less table with the same number of columns right
+    after one is treated as that table continuing on the next page."""
     from .ingestion import find_header, extract_rows
-    if tables:
-        header = find_header(tables)
+    out: list[dict] = []
+    cols, width = None, None
+    for table in tables:
+        header = find_header(table)
         if header:
             idx, cols = header
-            table_warnings: list[str] = []
-            rows = extract_rows(tables, cols, idx, kind, table_warnings)
-            if rows:
-                warnings += [w for w in table_warnings if not w.startswith("Skipped")]
-                return rows
-    rows = parse_lines(text, kind, warnings)
-    if rows:
-        warnings.append("Read from PDF text — compare the imported total with your statement.")
+            width = len(table[idx])
+        elif cols is not None and table and len(table[0]) == width:
+            idx = -1  # continuation of the previous table
+        else:
+            cols = width = None
+            continue
+        out += extract_rows(table, cols, idx, kind, warnings)
+    return out
+
+
+def _renumber(rows: list[dict]) -> list[dict]:
+    for i, r in enumerate(rows, start=1):
+        r["source_row"] = i  # rows from several tables/pages: keep row numbers unique within the file
     return rows
+
+
+def parse_pdf(content: PdfContent, kind: str, warnings: list[str], diagnostics: dict | None = None) -> list[dict]:
+    """Try each extraction method and keep the one that finds the most transactions."""
+    attempts = []
+    for name, fn in [("tables", lambda w: _rows_from_tables(content.tables, kind, w)),
+                     ("aligned tables", lambda w: _rows_from_tables(content.text_tables, kind, w)),
+                     ("text lines", lambda w: parse_lines(content.text, kind, w)),
+                     ("layout lines", lambda w: parse_lines(content.layout_text, kind, w))]:
+        w: list[str] = []
+        try:
+            rows = fn(w)
+        except Exception:
+            rows = []
+        attempts.append((len(rows), name, rows, w))
+    if diagnostics is not None:
+        diagnostics.update({name: n for n, name, _, _ in attempts})
+        diagnostics["pages"] = content.pages
+        diagnostics["date_lines"] = sum(1 for line in content.text.splitlines() if re.match(rf"\s*{DATE}", line.strip(), re.I))
+    best = max(attempts, key=lambda a: a[0])  # ties keep the earliest (tables before text)
+    n, name, rows, w = best
+    if not rows:
+        return []
+    for x in w:
+        if not x.startswith("Skipped") and x not in warnings:
+            warnings.append(x)
+    if "tables" not in name:
+        warnings.append("Read from PDF text — compare the imported total with your statement.")
+    return _renumber(rows)

@@ -19,6 +19,7 @@ KEEP = {w.lower() for w in """date dates time txn transaction transactions detai
 
 
 def mask(text: str) -> str:
+    text = re.sub(r"(\(cid:\d+\))+", "[icons]", text)  # glyphs without text, e.g. phone/email icons
     text = re.sub(r"\d", "9", text)
     def word(m):
         w = m.group(0)
@@ -49,7 +50,8 @@ def main(argv=None):
     except NeedsPassword:
         sys.exit("Could not open the PDF: none of the password patterns worked. Check --name/--dob/--pan or pass --password.")
     print("== Unlock ==\n" + ("opened (no password needed)" if plain is data else "opened with a password built from your details"))
-    text, tables = read_pdf(plain)
+    content = read_pdf(plain)
+    text, tables = content.text, [row for t in content.tables for row in t]
     show = (lambda s: s) if args.unmasked else mask
     info = detect(text)
     print("== Detection ==")
@@ -62,8 +64,10 @@ def main(argv=None):
     for row in tables[:15]:
         print("   | " + " | ".join(show(str(c or "")).replace("\n", " ⏎ ") for c in row))
     warnings: list[str] = []
-    rows = parse_pdf(text, tables, info["kind"] or "bank", warnings)
+    diag: dict = {}
+    rows = parse_pdf(content, info["kind"] or "bank", warnings, diag)
     print(f"\n== Parser result: {len(rows)} transaction(s) ==")
+    print("   found per method: " + ", ".join(f"{k}={v}" for k, v in diag.items()))
     for r in rows[:10]:
         print(f"   {r['date']}  debit={'yes' if r['debit'] else 'no '}  credit={'yes' if r['credit'] else 'no '}  {show(r['narration'])[:60]}")
     for w in warnings:

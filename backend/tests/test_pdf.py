@@ -8,10 +8,10 @@ from tests.conftest import signup
 
 
 def parse(data, kind=None):
-    text, tables = read_pdf(data)
-    info = detect(text)
+    content = read_pdf(data)
+    info = detect(content.text)
     warnings = []
-    return info, parse_pdf(text, tables, kind or info["kind"], warnings), warnings
+    return info, parse_pdf(content, kind or info["kind"], warnings), warnings
 
 
 def test_card_pdf_detected_and_parsed():
@@ -48,7 +48,7 @@ def test_password_patterns():
         unlock(locked, Hints())
     with pytest.raises(NeedsPassword):
         unlock(locked, Hints(name="Someone Else", dob="1990-12-05"))
-    assert read_pdf(unlock(locked, Hints(name="Priya Sharma", dob="05/12/1990")))[0].startswith("HDFC Bank")
+    assert read_pdf(unlock(locked, Hints(name="Priya Sharma", dob="05/12/1990"))).text.startswith("HDFC Bank")
     assert unlock(locked, Hints(passwords=["PRIY0512"]))
 
 
@@ -85,3 +85,43 @@ def test_explicit_password_and_named_account(client):
     locked = encrypt(bank_statement(), "s3cret-pw")
     res = upload(client, h, [("stmt.pdf", locked)], password="s3cret-pw", account_name="Joint savings", kind="bank")
     assert res["files"][0]["account"] == "Joint savings" and res["files"][0]["transactions"] == 4
+
+
+def test_icici_tables_are_not_glued_together():
+    from tests.pdf_fixtures import icici_card_statement
+    info, rows, _ = parse(icici_card_statement())
+    assert info == {"kind": "card", "institution": "ICICI Bank", "last4": "45"}
+    assert account_name(info, "x") == "ICICI Bank Credit Card ••45"
+    got = [(r["date"].isoformat(), r["narration"], r["debit"], r["credit"]) for r in rows]
+    assert got == [
+        ("2025-09-05", "BBPS Payment received", 0, Decimal("12000.00")),
+        ("2025-09-07", "AMAZON PAY INDIA BANGALORE IN", Decimal("2499.00"), 0),
+        ("2025-09-09", "SWIGGY BANGALORE IN", Decimal("640.50"), 0),
+        ("2025-09-12", "IRCTC NEW DELHI IN", Decimal("1845.00"), 0),     # page 2, table without a header
+        ("2025-09-15", "REFUND FLIPKART", 0, Decimal("499.00")),
+    ]
+    assert len({r["source_row"] for r in rows}) == len(rows)
+
+
+def test_hdfc_new_layout_with_time_and_plus_credits():
+    from tests.pdf_fixtures import hdfc_new_card_statement
+    info, rows, _ = parse(hdfc_new_card_statement())
+    assert info["kind"] == "card" and info["institution"] == "HDFC Bank"
+    got = [(r["narration"], r["debit"], r["credit"]) for r in rows]
+    assert got == [
+        ("ZOMATO GURGAON", Decimal("1240.00"), 0),
+        ("NETFLIX.COM MUMBAI", Decimal("649.00"), 0),
+        ("PAYMENT RECEIVED - NETBANKING", 0, Decimal("25000.00")),
+        ("UBER INDIA SYSTEMS BANGALORE", Decimal("312.40"), 0),
+        ("REVERSAL ZOMATO", 0, Decimal("240.00")),
+    ]
+
+
+def test_failed_pdf_reports_diagnostics(client):
+    from tests.conftest import signup
+    from tests.pdf_fixtures import _text_pdf
+    h = signup(client)
+    junk = _text_pdf(["Some Bank", "Welcome to your statement"] + ["Nothing to see here, no transactions at all"] * 5)
+    res = client.post("/imports/upload", headers=h, data={"account_name": "", "kind": "auto"},
+                      files=[("files", ("x.pdf", junk, "application/pdf"))]).json()["files"][0]
+    assert "Diagnostics:" in res["error"] and "page(s)" in res["error"]
