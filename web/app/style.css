@@ -45,6 +45,7 @@ aside nav a:hover { background: #e5f0ea; }
 aside nav a.active, .mobilenav a.active { background: var(--soft); color: var(--accent-ink); }
 .privacy { margin: auto 12px 0; color: #3e5148; font-weight: 700; line-height: 1.4; }
 .privacy small { color: var(--muted); font-weight: 400; }
+.privacy .link { display: block; }
 .mobilenav { display: none; }
 .content { padding: 36px; max-width: 1400px; width: 100%; margin: 0 auto; min-width: 0; }
 .content > * + * { margin-top: 18px; }
