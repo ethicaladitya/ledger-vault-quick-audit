@@ -1,0 +1,9 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+sqlalchemy==2.0.40
+psycopg[binary]==3.2.6
+pydantic==2.11.3
+openpyxl==3.1.5
+python-multipart==0.0.20
+pytest==8.3.5
+email-validator==2.2.0
