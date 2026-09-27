@@ -20,6 +20,7 @@ It's self-hosted, so your financial data never leaves your machine or server.
 - **Never double-counts the same statement.** Re-uploading a file does nothing, and uploading the same period again as PDF and Excel, or re-downloaded, is recognised even when it would have landed in a different account. It's merged, with a note.
 - **You confirm before anything counts.** After each upload, a review screen shows the detected accounts and the suggested categories grouped by payee (e.g. "REC LIMITED · 6 credits · Dividend"). Change what's wrong, then click **Confirm all**.
 - **Never double-counts.** Paying your credit-card bill isn't an expense; the purchases on the card are. LedgerVault matches each bank payment to the card statement and does the same for transfers between your own accounts.
+- **Credit card reconciliation your CA can read at a glance.** Per card, it shows purchases (counted as expenses), refunds, bill payments received and how many were matched to a bank debit. It lists payments made to cards whose statements you haven't uploaded, flags cash payments, and gives your total card bill payments for the year to compare with the "Payment of credit card bills" figure in your AIS.
 - **Runs an audit for you.** It flags things you'd rather hear from it than from a tax notice:
   - large credits with no clear source
   - cash deposits and card spend approaching the ₹10 lakh SFT reporting limits
