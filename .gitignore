@@ -1,5 +1,24 @@
 web/node_modules/
+web/.next/
+web/next-env.d.ts
 backend/**/__pycache__/
+backend/.pytest_cache/
 *.py[cod]
+*.db
 .DS_Store
 .env
+.env.*
+!.env.example
+
+# Keys and personal financial documents must never be committed.
+*.pem
+*.key
+private/
+statements/
+*.pdf
+*.xls
+*.xlsx
+*.zip
+*.csv
+!sample-data/*.csv
+web/tsconfig.tsbuildinfo

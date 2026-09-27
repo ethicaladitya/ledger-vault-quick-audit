@@ -1,7 +1,122 @@
 "use client";
-import {useEffect,useState} from "react";
-type Dash={income:string;expenses:string;neutral:string;transactions:number;exceptions:number;accounts:number}; type Tx={id:number;date:string;narration:string;debit:string;credit:string;category:string;status:string};
-const money=(v:string)=>new Intl.NumberFormat("en-IN",{style:"currency",currency:"INR",maximumFractionDigits:0}).format(Number(v));
-export default function Home(){const [token,setToken]=useState<string|undefined>(()=>typeof window!=="undefined"?localStorage.getItem("ledger_token")||undefined:undefined);return token?<Dashboard token={token} onLogout={()=>{localStorage.removeItem("ledger_token");setToken(undefined)}}/>:<Auth onAuth={t=>{localStorage.setItem("ledger_token",t);setToken(t)}}/>}
-function Auth({onAuth}:{onAuth:(token:string)=>void}){const [register,setRegister]=useState(false);const [email,setEmail]=useState("");const [password,setPassword]=useState("");const [name,setName]=useState("");const [error,setError]=useState("");const submit=async(e:React.FormEvent)=>{e.preventDefault();const res=await fetch(`/api/auth/${register?"register":"login"}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(register?{email,password,full_name:name}:{email,password})});const body=await res.json();if(!res.ok){setError(body.detail||"Unable to sign in");return}onAuth(body.token)};return <main className="auth"><div className="authbox"><div className="brand">Ledger<span>Vault</span></div><p className="eyebrow">Private ITR workspace</p><h1>{register?"Create your ledger":"Welcome back"}</h1><p className="muted">Keep statements, financial years and CA working papers in one evidence-first workspace.</p><form onSubmit={submit}>{register&&<label>Full name<input value={name} onChange={e=>setName(e.target.value)} required /></label>}<label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)} required /></label><label>Password<input type="password" minLength={10} value={password} onChange={e=>setPassword(e.target.value)} required /></label>{error&&<p className="error">{error}</p>}<button>{register?"Create workspace":"Sign in"}</button></form><button className="link" onClick={()=>setRegister(!register)}>{register?"Already have an account? Sign in":"New here? Create an account"}</button></div></main>}
-function Dashboard({token,onLogout}:{token:string;onLogout:()=>void}){const [dash,setDash]=useState<Dash>();const [tx,setTx]=useState<Tx[]>([]);const [message,setMessage]=useState("");const headers={Authorization:`Bearer ${token}`};const load=()=>{fetch("/api/dashboard",{headers}).then(r=>r.ok?r.json():onLogout()).then(v=>v&&setDash(v));fetch("/api/transactions",{headers}).then(r=>r.json()).then(setTx)};useEffect(load,[]);const demo=async()=>{setMessage("Importing evidence and reconciling…");let a=await fetch("/api/imports/folder",{method:"POST",headers:{...headers,"content-type":"application/json"},body:JSON.stringify({path:"/imports",account_name:"Demo accounts",financial_year:"2026-27"})});setMessage(a.ok?"Imported and reconciled sample evidence.":"Import needs attention.");load()};return <main><aside><div className="brand">Ledger<span>Vault</span></div><p className="eyebrow">Financial year 2026–27</p>{["Overview","Transactions","Accounts & Cards","Statements","Categories & Rules","Reconciliation","Tax Workspace","CA Review","Reports","Settings"].map((x,i)=><a className={i===0?"active":""} key={x}>{x}</a>)}<div className="privacy">Private workspace<br/><small>Local evidence. No telemetry.</small><button className="link" onClick={onLogout}>Sign out</button></div></aside><section className="content"><header><div><p className="eyebrow">ITR working papers</p><h1>Financial clarity, with evidence.</h1></div><button onClick={demo}>Import demo evidence</button></header>{message&&<p className="notice">{message}</p>}<div className="metrics">{[["Income",dash?.income],["Actual expense",dash?.expenses],["Neutral settlements",dash?.neutral],["Exceptions",dash?.exceptions?.toString()]].map(([l,v])=><article key={l as string}><p>{l}</p><strong>{v===undefined?"—":l==="Exceptions"?v:money(v as string)}</strong>{l==="Neutral settlements"&&<small>Excluded from income & expense</small>}</article>)}</div><div className="split"><section className="panel"><div className="panelhead"><h2>Review queue</h2><span>{dash?.exceptions??0} open</span></div>{tx.filter(t=>t.status==="unmatched"||t.status==="ambiguous").slice(0,5).map(t=><div className="row" key={t.id}><div><b>{t.narration}</b><small>{t.date} · {t.category.replace("_"," ")}</small></div><span className="tag">{t.status}</span></div>)}{!tx.length&&<div className="empty">Import statement files to create a source-traceable ledger.</div>}</section><section className="panel"><div className="panelhead"><h2>CA bifurcation</h2><span>Provisional working paper</span></div><p className="explain">Working papers group receipts, actual expenses and neutral flows for CA review. They do not replace statutory Form 3CA/3CB/3CD or the CA’s signed submission.</p></section></div><section className="panel ledger"><div className="panelhead"><h2>Recent transactions</h2><span>{dash?.transactions??0} source rows</span></div><div className="table"><div className="thead"><span>Date</span><span>Description</span><span>Category</span><span>Amount</span></div>{tx.slice(0,8).map(t=><div className="trow" key={t.id}><span>{t.date}</span><b>{t.narration}</b><span className="category">{t.category.replaceAll("_"," ")}</span><span>{money(t.debit!=="0.00"?t.debit:t.credit)}</span></div>)}</div></section><footer>Tax treatment is provisional until reviewed by your Chartered Accountant.</footer></section></main>}
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { makeApi, type Year } from "./lib";
+import { Overview, Upload, Transactions, Reconciliation, Report } from "./views";
+
+const TOKEN_KEY = "ledger_token";
+const VIEWS = [
+  { id: "overview", label: "Overview" },
+  { id: "upload", label: "Upload & statements" },
+  { id: "transactions", label: "Transactions" },
+  { id: "reconciliation", label: "Reconciliation" },
+  { id: "report", label: "Report & export" },
+] as const;
+export type ViewId = (typeof VIEWS)[number]["id"];
+
+export default function Home() {
+  // Read the token after mount so server and client render the same markup.
+  const [token, setToken] = useState<string | null | undefined>(undefined);
+  useEffect(() => { try { setToken(localStorage.getItem(TOKEN_KEY)); } catch { setToken(null); } }, []);
+  const logout = useCallback(() => { try { localStorage.removeItem(TOKEN_KEY); } catch {} setToken(null); }, []);
+  if (token === undefined) return <main className="auth"><p className="muted">Loading…</p></main>;
+  if (!token) return <Auth onAuth={t => { try { localStorage.setItem(TOKEN_KEY, t); } catch {} setToken(t); }} />;
+  return <Workspace token={token} onLogout={logout} />;
+}
+
+function Auth({ onAuth }: { onAuth: (token: string) => void }) {
+  const [register, setRegister] = useState(false);
+  const [open, setOpen] = useState<boolean | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    fetch("/api/auth/config").then(r => r.json()).then(c => { setOpen(c.registration_open); if (!c.has_users) setRegister(true); }).catch(() => setOpen(false));
+  }, []);
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault(); setError(""); setBusy(true);
+    try {
+      const res = await fetch(`/api/auth/${register ? "register" : "login"}`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify(register ? { email, password, full_name: name } : { email, password }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) { setError(typeof body.detail === "string" ? body.detail : Array.isArray(body.detail) ? "Check the form: password needs 10+ characters and a valid email." : "Unable to sign in"); return; }
+      onAuth(body.token);
+    } catch { setError("Can't reach the server. Is the API running?"); } finally { setBusy(false); }
+  };
+  return (
+    <main className="auth">
+      <div className="authbox">
+        <div className="brand">Ledger<span>Vault</span></div>
+        <p className="eyebrow">Private ITR workspace</p>
+        <h1>{register ? "Create your ledger" : "Welcome back"}</h1>
+        <p className="muted">Upload your bank and credit-card statements, clean up categories, and hand your CA an evidence-backed working paper.</p>
+        <form onSubmit={submit}>
+          {register && <label>Full name<input value={name} onChange={e => setName(e.target.value)} required minLength={2} autoComplete="name" /></label>}
+          <label>Email<input type="email" value={email} onChange={e => setEmail(e.target.value)} required autoComplete="email" /></label>
+          <label>Password<input type="password" minLength={10} value={password} onChange={e => setPassword(e.target.value)} required autoComplete={register ? "new-password" : "current-password"} />{register && <small className="muted">At least 10 characters.</small>}</label>
+          {error && <p className="error">{error}</p>}
+          <button disabled={busy}>{busy ? "Please wait…" : register ? "Create workspace" : "Sign in"}</button>
+        </form>
+        {(open || register) && <button className="link" onClick={() => { setRegister(!register); setError(""); }}>{register ? "Already have an account? Sign in" : "New here? Create an account"}</button>}
+      </div>
+    </main>
+  );
+}
+
+function Workspace({ token, onLogout }: { token: string; onLogout: () => void }) {
+  const api = useMemo(() => makeApi(token, onLogout), [token, onLogout]);
+  const [view, setView] = useState<ViewId>("overview");
+  const [years, setYears] = useState<Year[]>([]);
+  const [fy, setFy] = useState<string>("");
+  const [version, setVersion] = useState(0);
+  const [txFilter, setTxFilter] = useState<string>("");
+
+  useEffect(() => {
+    const fromHash = () => { const h = window.location.hash.slice(1) as ViewId; if (VIEWS.some(v => v.id === h)) setView(h); };
+    fromHash(); window.addEventListener("hashchange", fromHash);
+    return () => window.removeEventListener("hashchange", fromHash);
+  }, []);
+  useEffect(() => {
+    api.get<Year[]>("/years").then(ys => { setYears(ys); setFy(cur => (cur && ys.some(y => y.financial_year === cur) ? cur : ys[0]?.financial_year ?? "")); }).catch(() => {});
+  }, [api, version]);
+
+  const go = (v: ViewId, filter = "") => { setTxFilter(filter); setView(v); window.location.hash = v; window.scrollTo(0, 0); };
+  const refresh = () => setVersion(v => v + 1);
+  const props = { api, fy, version, refresh, go };
+
+  return (
+    <main className="shell">
+      <aside>
+        <div className="brand">Ledger<span>Vault</span></div>
+        <label className="fy">
+          <span className="eyebrow">Financial year</span>
+          <select value={fy} onChange={e => setFy(e.target.value)}>
+            {years.length === 0 && <option value="">No data yet</option>}
+            {years.map(y => <option key={y.financial_year} value={y.financial_year}>FY {y.financial_year} ({y.transactions})</option>)}
+          </select>
+        </label>
+        <nav>
+          {VIEWS.map(v => <a key={v.id} href={`#${v.id}`} className={view === v.id ? "active" : ""} onClick={e => { e.preventDefault(); go(v.id); }}>{v.label}</a>)}
+        </nav>
+        <div className="privacy">Private workspace<br /><small>Your statements stay on this server. No telemetry.</small><button className="link" onClick={onLogout}>Sign out</button></div>
+      </aside>
+      <nav className="mobilenav">
+        {VIEWS.map(v => <a key={v.id} href={`#${v.id}`} className={view === v.id ? "active" : ""} onClick={e => { e.preventDefault(); go(v.id); }}>{v.label}</a>)}
+        <select value={fy} onChange={e => setFy(e.target.value)} aria-label="Financial year">
+          {years.map(y => <option key={y.financial_year} value={y.financial_year}>FY {y.financial_year}</option>)}
+        </select>
+      </nav>
+      <section className="content">
+        {view === "overview" && <Overview {...props} />}
+        {view === "upload" && <Upload {...props} />}
+        {view === "transactions" && <Transactions {...props} initialStatus={txFilter} />}
+        {view === "reconciliation" && <Reconciliation {...props} />}
+        {view === "report" && <Report {...props} />}
+        <footer>Tax treatment is provisional until reviewed by your Chartered Accountant. <button className="link inline" onClick={onLogout}>Sign out</button></footer>
+      </section>
+    </main>
+  );
+}

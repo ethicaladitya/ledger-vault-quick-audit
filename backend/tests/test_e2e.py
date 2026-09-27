@@ -1,19 +1,20 @@
-from pathlib import Path
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from app.database import Base
 from app.models import Workspace, Transaction
-from app.services.ingestion import import_csv
+from app.services.ingestion import import_path
 from app.services.reconciliation import reconcile
 
-def test_card_settlement_is_neutral_and_idempotent(tmp_path):
-    engine=create_engine("sqlite://"); Base.metadata.create_all(engine); db=sessionmaker(bind=engine)(); db.add(Workspace(name="test")); db.commit()
-    bank=tmp_path/"bank.csv"; bank.write_text("date,narration,debit,credit\n2026-04-10,CARD PAYMENT HDFC,35000,\n")
-    card=tmp_path/"card.csv"; card.write_text("date,narration,debit,credit\n2026-04-11,CARD PAYMENT RECEIVED,,35000\n2026-04-03,UPI SWIGGY,1200,\n")
-    assert import_csv(db,bank,"HDFC Bank","bank")["transactions"]==1
-    assert reconcile(db)["confirmed"]==0
-    import_csv(db,card,"HDFC Card","card"); assert reconcile(db)["confirmed"]==1
-    rows=db.query(Transaction).all(); assert len(rows)==3
-    assert [r for r in rows if r.status=="confirmed_settlement"]
-    assert import_csv(db,card,"HDFC Card","card")["duplicate"] is True
-    assert db.query(Transaction).count()==3
+
+def test_card_settlement_is_neutral_and_idempotent(db, tmp_path):
+    ws = Workspace(name="test"); db.add(ws); db.commit()
+    bank = tmp_path / "bank.csv"; bank.write_text("date,narration,debit,credit\n2026-04-10,CARD PAYMENT HDFC,35000,\n")
+    card = tmp_path / "card.csv"; card.write_text("date,narration,debit,credit\n2026-04-11,CARD PAYMENT RECEIVED,,35000\n2026-04-03,UPI SWIGGY,1200,\n")
+    assert import_path(db, bank, "HDFC Bank", "bank", ws.id)[0]["transactions"] == 1
+    assert reconcile(db, ws.id)["confirmed"] == 0
+    import_path(db, card, "HDFC Card", "card", ws.id)
+    assert reconcile(db, ws.id)["confirmed"] == 1
+    rows = db.query(Transaction).all()
+    assert len(rows) == 3
+    assert sum(r.status == "confirmed_settlement" for r in rows) == 2
+    assert next(r for r in rows if "SWIGGY" in r.narration).category == "dining"
+    assert import_path(db, card, "HDFC Card", "card", ws.id)[0]["duplicate"] is True
+    assert db.query(Transaction).count() == 3
+    assert reconcile(db, ws.id)["confirmed"] == 1  # re-running is stable

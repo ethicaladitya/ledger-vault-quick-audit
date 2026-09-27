@@ -2,7 +2,18 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 [[ -f .env ]] || { echo 'Missing .env; run ./setup.sh first.' >&2; exit 1; }
+if ! grep -qE '^SITE_ADDRESS=.+' .env; then
+  echo 'Warning: SITE_ADDRESS is not set in .env, so the site is served over plain HTTP on port 80.' >&2
+  echo '         Add SITE_ADDRESS=your.domain to .env for automatic HTTPS.' >&2
+fi
 docker compose up -d --build
 docker compose ps
-curl --fail --silent --show-error --retry 10 --retry-delay 2 http://localhost/api/health >/dev/null
-echo 'LedgerVault deployed and healthy.'
+for _ in $(seq 1 30); do
+  if docker compose exec -T api python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" 2>/dev/null; then
+    echo 'LedgerVault deployed and healthy.'
+    exit 0
+  fi
+  sleep 2
+done
+echo 'API did not become healthy; check: docker compose logs api' >&2
+exit 1
