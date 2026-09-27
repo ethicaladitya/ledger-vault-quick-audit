@@ -551,7 +551,9 @@ type AccountLine = { account_id: number; account: string; kind: string; count: n
 
 type CardLine = { account_id: number; account: string; purchases: string; purchase_count: number; refunds: string; payments: string; payment_count: number;
   matched: string; matched_count: number; unmatched: string; unmatched_count: number; cash_payments: string };
-type CardRecon = { cards: CardLine[]; unmatched_bank_payments: { id: number; date: string; account: string; narration: string; amount: string }[];
+type MissingStatement = { card: string; account_id: number | null; status: "not_uploaded" | "period_missing" | "not_matched"; count: number; amount: string; months: string[];
+  payments: { id: number; date: string; bank: string; narration: string; amount: string }[]; message: string };
+type CardRecon = { cards: CardLine[]; missing_statements: MissingStatement[]; unmatched_bank_payments: { id: number; date: string; account: string; narration: string; amount: string }[];
   unmatched_bank_total: string; total_paid: string; total_purchases: string; cash_paid: string; sft_reportable: boolean };
 
 function CreditCards({ data, go }: { data: CardRecon; go: (v: ViewId, filter?: string) => void }) {
@@ -575,12 +577,18 @@ function CreditCards({ data, go }: { data: CardRecon; go: (v: ViewId, filter?: s
           ))}</tbody>
         </table></div>
       )}
-      {data.unmatched_bank_payments.length > 0 && (
+      {data.missing_statements.length > 0 && (
         <div className="orphans">
-          <b>Paid to a card whose statement isn't uploaded: {money(data.unmatched_bank_total)}</b>
-          <ul>{data.unmatched_bank_payments.slice(0, 8).map(u => <li key={u.id}>{u.date} · {u.account} · {u.narration} · <b>{money(u.amount)}</b></li>)}</ul>
-          {data.unmatched_bank_payments.length > 8 && <small className="muted">and {data.unmatched_bank_payments.length - 8} more</small>}
-          <button className="link" onClick={() => go("upload")}>Upload those card statements so their purchases are counted →</button>
+          <b>Missing card statements: the report is incomplete until these are uploaded</b>
+          <ul className="missing">{data.missing_statements.map((g, i) => (
+            <li key={i}>
+              <div><b>{g.card}</b> <span className="tag">{g.status === "not_uploaded" ? "Not uploaded" : g.status === "period_missing" ? `Missing: ${g.months.join(", ")}` : "Payment not found"}</span></div>
+              <small>{g.count} bill payment{g.count === 1 ? "" : "s"} of {money(g.amount)} from your bank · {g.months.join(", ")}</small>
+              <small className="muted block">{g.message}</small>
+              <details><summary>Show payments</summary><ul>{g.payments.map(p => <li key={p.id}>{p.date} · {p.bank} · {p.narration} · <b>{money(p.amount)}</b></li>)}</ul></details>
+            </li>
+          ))}</ul>
+          <button onClick={() => go("upload")}>Upload card statements</button>
         </div>
       )}
       <div className={`cardtotal ${data.sft_reportable ? "warn" : ""}`}>

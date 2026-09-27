@@ -292,3 +292,25 @@ def test_credit_card_reconciliation(client):
     assert "Credit cards" in wb.sheetnames
     cells = [str(v) for row in wb["Credit cards"].iter_rows(values_only=True) for v in row if v is not None]
     assert "CC PAYMENT AXIS 4455" in cells and 48000.0 in [v for row in wb["Credit cards"].iter_rows(values_only=True) for v in row]
+
+
+def test_missing_card_statements_are_named(client):
+    h = signup(client)
+    bank = ("date,narration,debit,credit\n"
+            "2025-04-10,CC 0000XXXXXXXX9876 AUTOPAY SI-TAD,35000,\n"      # matched to the uploaded April statement
+            "2025-06-10,CC 0000XXXXXXXX9876 AUTOPAY SI-TAD,12000,\n"      # same card, June statement not uploaded
+            "2025-04-20,CC PAYMENT AXIS 4455,8000,\n"                      # Axis card never uploaded
+            "2025-05-20,CC PAYMENT AXIS 4455,6000,\n"
+            "2025-05-02,POS 416021XXXXXX9685 DREAMPLUG PAYTEC,51000,\n")  # paid through CRED with the debit card
+    card = ("date,narration,debit,credit\n2025-04-03,AMAZON,20000,\n2025-04-11,PAYMENT RECEIVED THANK YOU,,35000\n")
+    upload(client, h, [("bank.csv", bank)], "HDFC Savings")
+    upload(client, h, [("card.csv", card)], "HDFC Regalia ••9876", "card")
+    missing = client.get("/report", headers=h).json()["cards"]["missing_statements"]
+    by = {g["card"]: g for g in missing}
+    assert by["Axis Bank card ••4455"]["status"] == "not_uploaded" and by["Axis Bank card ••4455"]["months"] == ["Apr 2025", "May 2025"]
+    assert by["Axis Bank card ••4455"]["amount"] == "14000.00" and by["Axis Bank card ••4455"]["count"] == 2
+    assert by["HDFC Regalia ••9876"]["status"] == "period_missing" and by["HDFC Regalia ••9876"]["months"] == ["Jun 2025"]
+    assert by["Card not identified (paid via CRED)"]["amount"] == "51000.00"
+    titles = [f["title"] for f in client.get("/dashboard", headers=h).json()["flags"]]
+    assert "Axis Bank card ••4455: statement not uploaded" in titles
+    assert "HDFC Regalia ••9876: statement missing for Jun 2025" in titles
