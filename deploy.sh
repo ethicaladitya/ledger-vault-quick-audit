@@ -6,7 +6,9 @@ if ! grep -qE '^SITE_ADDRESS=.+' .env; then
   echo 'Warning: SITE_ADDRESS is not set in .env, so the site is served over plain HTTP on port 80.' >&2
   echo '         Add SITE_ADDRESS=your.domain to .env for automatic HTTPS.' >&2
 fi
+echo "Building images and restarting containers…"
 docker compose up -d --build
+echo "Waiting for the API to become healthy…"
 docker compose ps
 for _ in $(seq 1 30); do
   if docker compose exec -T api python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" 2>/dev/null; then
