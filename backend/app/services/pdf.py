@@ -29,7 +29,8 @@ TIME = r"\d{1,2}:\d{2}(?::\d{2})?(?:\s*[ap]m)?"
 AMT = r"(?:\d{1,3}(?:,\d{2,3})+|\d+)\.\d{2}"
 AMOUNT = rf"-?{AMT}"
 # date [time] [value date [time]] narration amounts...  (amounts may carry +/- and a Cr/Dr/C/D marker)
-LINE = re.compile(rf"^\s*({DATE})\s+(?:{TIME}\s+)?(?:{DATE}\s+(?:{TIME}\s+)?)?(.*?)\s+((?:[+-]?\s*{AMT}\s*(?:cr|dr|c|d)?\.?\s*)+)$", re.I)
+# The narration may be empty: HDFC prints a two-line description above and below the date line.
+LINE = re.compile(rf"^\s*({DATE})\s+(?:{TIME}\s+)?(?:{DATE}\s+(?:{TIME}\s+)?)?(?:(.*?)\s+)?((?:[+-]?\s*{AMT}\s*(?:cr|dr|c|d)?\.?\s*)+)$", re.I)
 AMOUNT_TAIL = re.compile(rf"([+-]?)\s*({AMT})\s*(cr|dr|c|d)?\b", re.I)
 CURRENCY = re.compile(r"₹|`|\brs\.?(?=\s|\d)|\binr\b|\|", re.I)
 SKIP = re.compile(r"opening balance|closing balance|\btotal\b|b/f|c/f|brought forward|carried forward|balance forward", re.I)
@@ -141,6 +142,9 @@ def clean_line(raw: str) -> str:
     line = re.sub(r"\(cid:\d+\)", " ", raw)
     line = CURRENCY.sub(" ", line)
     line = re.sub(r"[•●○◦▪■□►▶✓✔★☆]", " ", line)
+    # HDFC prints credits as "+ ₹ 25,000.00" and the ₹ glyph often extracts as "C": "+ C 25,000.00". Unless the
+    # "+" is tied to the amount here, it is cut off with the glyph and every payment received reads as a purchase.
+    line = re.sub(rf"(?<!\S)\+\s*(?:C\s+)?({AMT})(?!\S)", r"\1 Cr", line)
     # Letters glued onto an amount ("100.00l") that aren't a Cr/Dr marker.
     line = re.sub(r"(\d\.\d{2})([^\d\s.,]{1,2})(?=\s|$)", lambda m: m.group(0) if m.group(2).lower() in MARKERS else m.group(1), line)
     tokens = re.sub(r"\s+", " ", line).strip().split(" ")
@@ -167,17 +171,24 @@ def parse_lines(text: str, kind: str, warnings: list[str]) -> list[dict]:
             if rows and extra_lines < 2 and line and not re.search(AMOUNT, line) and not re.match(DATE, line) \
                     and len(line) < 80 and not re.search(r"page|statement|balance|total|continued", line, re.I):
                 rows[-1]["narration"] += " " + line
+                rows[-1]["_wrapped"].append(line)
                 extra_lines += 1
             else:
                 extra_lines = 2
             continue
         extra_lines = 0
         d = parse_date(m.group(1))
-        narration = re.sub(r"\s+", " ", m.group(2)).strip()
+        narration = re.sub(r"\s+", " ", m.group(2) or "").strip()
         narration = re.sub(r"^\d{8,}\s+", "", narration)  # leading transaction/serial reference number
         if kind == "card":
-            narration = re.sub(r"(\s+\+?\s?\d{1,5})+$", "", narration) if not re.search(r"\s-\s\d{1,5}$", narration) else narration  # trailing reward-points column ("30", "+ 12")
-            narration = re.sub(r"(\s+[+C`])+$", "", narration)  # a rupee glyph some fonts extract as "C" or "`"
+            # Trailing reward points ("30", "+ 12") and a rupee glyph some fonts extract as "C" or "`", in either order.
+            tail = r"(\s+[+C`])+$" if re.search(r"\s-\s\d{1,5}$", narration) else r"(\s+(?:[+C`]|\+?\s?\d{1,5}))+$"
+            narration = re.sub(r"^[+C`](\s+|$)", "", re.sub(tail, "", " " + narration).strip())
+        if not narration and rows and rows[-1]["_wrapped"]:
+            # Nothing on the date line: the description's first line was printed above it and got attached to the
+            # previous transaction as a wrapped line. Move it back, or that purchase reads as e.g. "CC PAYMENT".
+            narration = rows[-1]["_wrapped"].pop()
+            rows[-1]["narration"] = rows[-1]["narration"][: -len(narration) - 1]
         if d is None or SKIP.search(narration):
             if SKIP.search(narration) and "opening" in narration.lower():
                 amts = AMOUNT_TAIL.findall(m.group(3))
@@ -220,7 +231,10 @@ def parse_lines(text: str, kind: str, warnings: list[str]) -> list[dict]:
                 guessed += 1
         if debit == 0 and credit == 0:
             continue
-        rows.append({"source_row": n, "date": d, "narration": narration or "(no narration)", "debit": debit, "credit": credit, "balance": balance})
+        rows.append({"source_row": n, "date": d, "narration": narration, "debit": debit, "credit": credit, "balance": balance, "_wrapped": []})
+    for r in rows:
+        del r["_wrapped"]
+        r["narration"] = r["narration"].strip() or "(no narration)"
     if guessed:
         warnings.append(f"Debit/credit was inferred from the narration for {guessed} row(s) — spot-check them.")
     if broken:

@@ -182,3 +182,17 @@ def test_card_emi_on_tax_paid_by_card_counts_once(client):
     assert tax["debit"] == "50425.00" and tax["count"] == 1
     assert rep["totals"]["outflow"] == "51074.00"    # tax 50,425 + fee 199 + swiggy 450; EMI rows not spending again
     assert all(t["status"] == "ok" for t in client.get("/transactions?category=card_emi", headers=h).json()["items"])
+
+
+def test_hdfc_rupee_glyph_credits_and_descriptions_above_the_date_line():
+    from tests.pdf_fixtures import hdfc_wrapped_card_statement
+    info, rows, _ = parse(hdfc_wrapped_card_statement())
+    assert info["kind"] == "card"
+    got = [(r["narration"], r["debit"], r["credit"]) for r in rows]
+    assert got == [
+        ("SWIGGY BANGALORE", Decimal("450.00"), 0),     # the next row's first line is not glued on
+        ("BPPY CC PAYMENT DP016014200917ohu7V (Ref# ST260160083000010244551)", 0, Decimal("25000.00")),
+        ("AMAZON PAY INDIA BANGALORE", Decimal("1299.00"), 0),
+        ("UBER INDIA SYSTEMS BANGALORE", Decimal("312.40"), 0),
+        ("REFUND AMAZON PAY", 0, Decimal("1299.00")),
+    ]

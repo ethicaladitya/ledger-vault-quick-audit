@@ -129,3 +129,22 @@ def tata_neu_hdfc_statement() -> bytes:
         "05/12/2025| 10:15   PAYMENT RECEIVED NETBANKING          + Rs. 12,500.00",
         "Page 1 of 3",
     ])
+
+
+def hdfc_wrapped_card_statement() -> bytes:
+    """Shaped like the masked HDFC server rows: the ₹ glyph extracts as "C", credits print as "+ C 25,000.00",
+    and a two-line description sits above and below the date line, which then has no description at all."""
+    return _text_pdf([
+        "HDFC Bank Credit Card Statement   Card No: 6529 XXXX XXXX 1047",
+        "Total Amount Due  Minimum Amount Due  Credit Limit  Payment Due Date",
+        "DATE & TIME          TRANSACTION DESCRIPTION              REWARDS     AMOUNT     PI",
+        "14/01/2026| 12:45    SWIGGY BANGALORE                      + 12      C 450.00   l",
+        "BPPY CC PAYMENT DP016014200917ohu7V (Ref#",
+        "16/01/2026| 00:00                                                    + C 25,000.00",
+        "ST260160083000010244551)",
+        "18/01/2026| 09:00    AMAZON PAY INDIA BANGALORE            + 4       C 1,299.00 l",
+        "UBER INDIA SYSTEMS",
+        "20/01/2026| 21:10                                          + 2       C 312.40   l",
+        "BANGALORE",
+        "22/01/2026| 00:00    REFUND AMAZON PAY                               + C 1,299.00",
+    ])

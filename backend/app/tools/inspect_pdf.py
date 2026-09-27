@@ -24,6 +24,7 @@ def main(argv=None):
     ap.add_argument("--extras", default="", help="card last 4 digits / customer IDs, comma separated")
     ap.add_argument("--lines", type=int, default=80, help="text lines to show (default 80)")
     ap.add_argument("--unmasked", action="store_true", help="show real text (do not share this output)")
+    ap.add_argument("--all-rows", action="store_true", help="list every parsed row, not just the first 10")
     args = ap.parse_args(argv)
     from app.services.passwords import Hints
     from app.services.pdf import unlock, read_pdf, detect, parse_pdf, NeedsPassword
@@ -57,8 +58,8 @@ def main(argv=None):
     rows = parse_pdf(content, info["kind"] or "bank", warnings, diag)
     print(f"\n== Parser result: {len(rows)} transaction(s) ==")
     print("   found per method: " + ", ".join(f"{k}={v}" for k, v in diag.items()))
-    for r in rows[:10]:
-        print(f"   {r['date']}  debit={'yes' if r['debit'] else 'no '}  credit={'yes' if r['credit'] else 'no '}  {show(r['narration'])[:60]}")
+    for r in rows if args.all_rows else rows[:10]:
+        print(f"   {show(r['date'].isoformat())}  debit={'yes' if r['debit'] else 'no '}  credit={'yes' if r['credit'] else 'no '}  {show(r['narration'])[:60]}")
     for w in warnings:
         print("   warning:", w)
 
