@@ -113,8 +113,13 @@ def _logical_lines(text: str) -> list[str]:
     i = 0
     while i < len(raw):
         line = raw[i]
-        is_date_start = bool(DATE_PREFIX.match(line) or DATE_ONLY.match(line))
-        if is_date_start and not AMOUNT_TAIL.search(line):
+        date_only = DATE_ONLY.match(line)
+        date_prefix = DATE_PREFIX.match(line)
+        is_date_start = bool(date_prefix or date_only)
+        # Ignore the numeric pieces of a date when deciding whether a line
+        # already has a transaction amount.
+        amount_part = date_prefix.group(3) if date_prefix else ""
+        if is_date_start and (date_only or not AMOUNT_TAIL.search(amount_part)):
             parts = [line]
             j = i + 1
             while j < len(raw) and len(parts) < 4:
