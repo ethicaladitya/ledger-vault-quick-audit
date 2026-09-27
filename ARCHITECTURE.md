@@ -24,6 +24,14 @@ Readers turn CSV (delimiter sniffed, UTF-8/cp1252), XLSX (openpyxl), XLS (xlrd) 
 
 `GET /imports/review` groups the uploaded rows by `merchant_key` (the narration with codes, card numbers, references and dates removed) and category. `POST /imports/confirm` marks them user-confirmed and stores `user_rules` for groups the user changed. `PATCH /transactions/{id}` with `apply_similar` does the same for one payee. Learned rules take precedence over built-in rules on later imports. When `RULES_VERSION` changes, rule-categorised rows (never user-set ones) are re-classified on start-up.
 
+## Business vs personal (`services/purpose.py`)
+
+`workspace.business_mode` switches the UI on. Each account has `purpose` (business | personal | mixed), and each transaction has `purpose` (business | personal | unknown | neutral) with `purpose_source` (rule | user). `apply_purposes` runs at the end of every reconcile and recomputes rule-sourced purposes in this order: payee rules the user taught (`purpose_rules`); then the account's use, where business accounts keep clearly personal categories personal and personal accounts keep business-by-nature categories business; then the category (software, ads, courier, office, professional fees, GST, gateway receipts → business; groceries, dining, medical, salary, dividends, investments… → personal); then narration hints (GSTIN, invoice, vendor). Anything else stays unknown. `/report` and `/export.xlsx` accept `purpose=business|personal`; the report states how many rows were excluded as the other purpose or unknown.
+
+## Duplicate statements
+
+Identical files are skipped by SHA-256 per workspace. Rows overlapping an earlier statement of the same account are skipped by (date, amount, direction, narration prefix). Before creating a new account, `find_same_statement` checks whether at least 80% of the file's (date, debit, credit) rows (minimum 3, measured against the smaller side) already exist in one account. If so, it's the same statement in another format or a re-download, and it's merged there instead of being counted twice.
+
 ## Classification (`services/rules.py`)
 
 Ordered, direction-aware regex rules map narrations to categories. Each category has a group (income, tax, deduction hint, investment, expense, neutral, review) and an ITR hint. On a card account, payment-like credits are card settlements. User edits set `category_source=user` and are never overwritten.

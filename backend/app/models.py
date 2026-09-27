@@ -9,6 +9,7 @@ class Workspace(Base):
     __tablename__ = "workspaces"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(120), default="My Ledger")
+    business_mode: Mapped[bool] = mapped_column(Boolean, default=False)  # show business/personal split
 
 
 class User(Base):
@@ -39,6 +40,7 @@ class FinancialAccount(Base):
     name: Mapped[str] = mapped_column(String(120))
     kind: Mapped[str] = mapped_column(String(16))  # bank | card
     masked_identity: Mapped[str] = mapped_column(String(32), default="unknown")
+    purpose: Mapped[str] = mapped_column(String(10), default="mixed")  # business | personal | mixed
 
 
 class SourceDocument(Base):
@@ -78,7 +80,8 @@ class Transaction(Base):
     category: Mapped[str] = mapped_column(String(64), default="uncategorized")
     category_source: Mapped[str] = mapped_column(String(8), default="rule")  # rule | user
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    purpose: Mapped[str] = mapped_column(String(20), default="unknown")
+    purpose: Mapped[str] = mapped_column(String(20), default="unknown")  # business | personal | unknown | neutral
+    purpose_source: Mapped[str] = mapped_column(String(8), default="rule")  # rule | user
     status: Mapped[str] = mapped_column(String(24), default="ok")
     match_group: Mapped[str | None] = mapped_column(String(36), nullable=True)
     financial_year: Mapped[str] = mapped_column(String(9), default="2026-27")
@@ -108,3 +111,13 @@ class UserRule(Base):
     key: Mapped[str] = mapped_column(String(120))
     category: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PurposeRule(Base):
+    """Business/personal purpose the user taught for a counter-party (see rules.merchant_key)."""
+    __tablename__ = "purpose_rules"
+    __table_args__ = (UniqueConstraint("workspace_id", "key", name="uq_workspace_purpose_rule"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"))
+    key: Mapped[str] = mapped_column(String(120))
+    purpose: Mapped[str] = mapped_column(String(10))

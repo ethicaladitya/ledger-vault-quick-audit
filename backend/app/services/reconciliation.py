@@ -10,6 +10,7 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 from ..models import Transaction, FinancialAccount, AuditEvent
 from .rules import NEUTRAL, REVIEW
+from .purpose import apply_purposes
 
 WINDOWS = {"card_settlement": (-2, 7), "own_transfer": (-1, 3)}
 
@@ -56,6 +57,7 @@ def reconcile(db: Session, workspace_id: int) -> dict:
                 d.status = "ambiguous"
                 ambiguous += 1
     unmatched = sum(t.status == "unmatched" for t in txns)
+    apply_purposes(db, workspace_id)
     db.add(AuditEvent(workspace_id=workspace_id, action="reconciled", detail=f"confirmed={linked}; ambiguous={ambiguous}; unmatched={unmatched}"))
     db.commit()
     return {"confirmed": linked, "ambiguous": ambiguous, "unmatched": unmatched}

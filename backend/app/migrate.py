@@ -13,6 +13,9 @@ ADDED_COLUMNS = [
     ("source_documents", "account_id", "INTEGER REFERENCES financial_accounts(id)"),
     ("source_documents", "row_count", "INTEGER DEFAULT 0 NOT NULL"),
     ("audit_events", "workspace_id", "INTEGER REFERENCES workspaces(id)"),
+    ("workspaces", "business_mode", "BOOLEAN DEFAULT FALSE NOT NULL"),
+    ("financial_accounts", "purpose", "VARCHAR(10) DEFAULT 'mixed' NOT NULL"),
+    ("transactions", "purpose_source", "VARCHAR(8) DEFAULT 'rule' NOT NULL"),
 ]
 
 

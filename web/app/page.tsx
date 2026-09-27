@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { makeApi, type Year } from "./lib";
-import { Overview, Upload, Transactions, Reconciliation, Report } from "./views";
+import { Overview, Upload, Transactions, Reconciliation, Report, Settings } from "./views";
 
 const TOKEN_KEY = "ledger_token";
 const VIEWS = [
@@ -10,6 +10,7 @@ const VIEWS = [
   { id: "transactions", label: "Transactions" },
   { id: "reconciliation", label: "Reconciliation" },
   { id: "report", label: "Report & export" },
+  { id: "settings", label: "Settings" },
 ] as const;
 export type ViewId = (typeof VIEWS)[number]["id"];
 
@@ -73,6 +74,8 @@ function Workspace({ token, onLogout }: { token: string; onLogout: () => void })
   const [fy, setFy] = useState<string>("");
   const [version, setVersion] = useState(0);
   const [txFilter, setTxFilter] = useState<string>("");
+  const [businessMode, setBusinessMode] = useState(false);
+  useEffect(() => { api.get<{ business_mode: boolean }>("/settings").then(s => setBusinessMode(s.business_mode)).catch(() => {}); }, [api]);
 
   useEffect(() => {
     const fromHash = () => { const h = window.location.hash.slice(1) as ViewId; if (VIEWS.some(v => v.id === h)) setView(h); };
@@ -85,7 +88,7 @@ function Workspace({ token, onLogout }: { token: string; onLogout: () => void })
 
   const go = (v: ViewId, filter = "") => { setTxFilter(filter); setView(v); window.location.hash = v; window.scrollTo(0, 0); };
   const refresh = () => setVersion(v => v + 1);
-  const props = { api, fy, version, refresh, go };
+  const props = { api, fy, version, refresh, go, businessMode };
 
   return (
     <main className="shell">
@@ -115,6 +118,7 @@ function Workspace({ token, onLogout }: { token: string; onLogout: () => void })
         {view === "transactions" && <Transactions {...props} initialStatus={txFilter} />}
         {view === "reconciliation" && <Reconciliation {...props} />}
         {view === "report" && <Report {...props} />}
+        {view === "settings" && <Settings {...props} onBusinessMode={setBusinessMode} />}
         <footer>Tax treatment is provisional until reviewed by your Chartered Accountant. <button className="link inline" onClick={onLogout}>Sign out</button></footer>
       </section>
     </main>

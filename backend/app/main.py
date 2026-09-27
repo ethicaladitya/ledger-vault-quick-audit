@@ -7,12 +7,12 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from .database import get_db
-from .models import Workspace, Transaction, FinancialAccount, User, SourceDocument, AuditEvent, UserRule
+from .models import Workspace, Transaction, FinancialAccount, User, SourceDocument, AuditEvent, UserRule, PurposeRule
 from .security import hash_password, verify_password, token_for, current_user, check_login_allowed, record_login_failure
 from .services.ingestion import import_file, import_path, MAX_FILE
 from .services.passwords import Hints
 from .services.reconciliation import reconcile, base_status
-from .services.report import fy_transactions, totals, category_summary, account_summary, flags, export_xlsx
+from .services.report import fy_transactions, totals, category_summary, account_summary, flags, export_xlsx, purpose_flags, purpose_split
 from .services.rules import CATEGORIES, NEUTRAL, merchant_key, classify
 from . import migrate
 
@@ -42,18 +42,26 @@ class Login(BaseModel):
 class TxUpdate(BaseModel):
     category: str | None = None
     note: str | None = Field(default=None, max_length=1000)
-    apply_similar: bool = False  # also re-categorise same-counterparty rows and remember it for future uploads
+    purpose: str | None = Field(default=None, pattern="^(business|personal|unknown)$")
+    apply_similar: bool = False  # also apply the change to same-counterparty rows and remember it for future uploads
 
 
 class AccountUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     kind: str | None = Field(default=None, pattern="^(bank|card)$")
+    purpose: str | None = Field(default=None, pattern="^(business|personal|mixed)$")
+
+
+class SettingsUpdate(BaseModel):
+    business_mode: bool
 
 
 class ConfirmGroup(BaseModel):
     tx_ids: list[int] = Field(max_length=5000)
     category: str
-    remember_key: str | None = Field(default=None, max_length=120)
+    remember_key: str | None = Field(default=None, max_length=120)  # remember the category for this payee
+    purpose: str | None = Field(default=None, pattern="^(business|personal|unknown)$")
+    remember_purpose_key: str | None = Field(default=None, max_length=120)
 
 
 class ConfirmImport(BaseModel):
@@ -80,7 +88,7 @@ def _tx_json(t: Transaction, a: FinancialAccount | None = None) -> dict:
             "balance": _money(t.balance), "category": t.category, "category_label": label, "group": group, "itr_hint": hint,
             "category_source": t.category_source, "note": t.note, "status": t.status, "match_group": t.match_group,
             "financial_year": t.financial_year, "account_id": t.account_id, "account": a.name if a else None, "account_kind": a.kind if a else None,
-            "document_id": t.document_id, "source_row": t.source_row}
+            "document_id": t.document_id, "source_row": t.source_row, "purpose": t.purpose, "purpose_source": t.purpose_source}
 
 
 # ---------------- auth ----------------
@@ -186,6 +194,38 @@ def folder_import(body: FolderImport, db: Session = Depends(get_db), user: User 
     return {"files": results, "reconciliation": reconcile(db, user.workspace_id)}
 
 
+# ---------------- settings ----------------
+
+@app.get("/settings")
+def get_settings(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    ws = db.get(Workspace, user.workspace_id)
+    return {"business_mode": bool(ws.business_mode)}
+
+
+@app.patch("/settings")
+def update_settings(body: SettingsUpdate, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    ws = db.get(Workspace, user.workspace_id)
+    ws.business_mode = body.business_mode
+    db.add(AuditEvent(workspace_id=user.workspace_id, action="settings_updated", detail=f"business_mode={body.business_mode}"))
+    db.commit()
+    return {"business_mode": ws.business_mode}
+
+
+def _remember(db: Session, workspace_id: int, key: str, category: str | None = None, purpose: str | None = None):
+    if category:
+        rule = db.query(UserRule).filter_by(workspace_id=workspace_id, key=key).first()
+        if rule:
+            rule.category = category
+        else:
+            db.add(UserRule(workspace_id=workspace_id, key=key, category=category))
+    if purpose in ("business", "personal"):
+        prule = db.query(PurposeRule).filter_by(workspace_id=workspace_id, key=key).first()
+        if prule:
+            prule.purpose = purpose
+        else:
+            db.add(PurposeRule(workspace_id=workspace_id, key=key, purpose=purpose))
+
+
 # ---------------- post-upload review ----------------
 
 @app.get("/imports/review")
@@ -205,8 +245,8 @@ def import_review(docs: str = Query(..., max_length=2000), db: Session = Depends
     groups: dict[tuple, dict] = {}
     for t in rows:
         key = merchant_key(t.narration)
-        gk = (key or t.narration.lower(), t.category, t.debit > 0)
-        g = groups.setdefault(gk, {"key": key, "example": t.narration, "category": t.category, "direction": "out" if t.debit > 0 else "in",
+        gk = (key or t.narration.lower(), t.category, t.debit > 0, t.purpose)
+        g = groups.setdefault(gk, {"key": key, "example": t.narration, "category": t.category, "purpose": t.purpose, "direction": "out" if t.debit > 0 else "in",
                                    "count": 0, "total": Decimal(), "tx_ids": [], "confirmed": True})
         g["count"] += 1
         g["total"] += t.debit if t.debit > 0 else t.credit
@@ -230,13 +270,14 @@ def import_confirm(body: ConfirmImport, db: Session = Depends(get_db), user: Use
                 .filter(FinancialAccount.workspace_id == user.workspace_id, Transaction.id.in_(g.tx_ids)).all())
         for t in rows:
             t.category, t.category_source = g.category, "user"
+            if g.purpose and g.purpose != "unknown" and g.category not in NEUTRAL:
+                t.purpose, t.purpose_source = g.purpose, "user"
         updated += len(rows)
         if g.remember_key:
-            rule = db.query(UserRule).filter_by(workspace_id=user.workspace_id, key=g.remember_key).first()
-            if rule:
-                rule.category = g.category
-            else:
-                db.add(UserRule(workspace_id=user.workspace_id, key=g.remember_key, category=g.category))
+            _remember(db, user.workspace_id, g.remember_key, category=g.category)
+            remembered += 1
+        if g.remember_purpose_key and g.purpose:
+            _remember(db, user.workspace_id, g.remember_purpose_key, purpose=g.purpose)
             remembered += 1
     db.add(AuditEvent(workspace_id=user.workspace_id, action="import_confirmed", detail=f"{updated} rows confirmed; {remembered} rules remembered"))
     db.commit()
@@ -257,10 +298,12 @@ def update_account(account_id: int, body: AccountUpdate, db: Session = Depends(g
         learned = {u.key: u.category for u in db.query(UserRule).filter_by(workspace_id=user.workspace_id)}
         for t in db.query(Transaction).filter(Transaction.account_id == account.id, Transaction.category_source != "user"):
             t.category = classify(t.narration, t.debit > 0, account.kind, learned)
+    if body.purpose:
+        account.purpose = body.purpose
     db.add(AuditEvent(workspace_id=user.workspace_id, action="account_updated", detail=f"account #{account.id}"))
     db.commit()
     reconcile(db, user.workspace_id)
-    return {"id": account.id, "name": account.name, "kind": account.kind}
+    return {"id": account.id, "name": account.name, "kind": account.kind, "purpose": account.purpose}
 
 
 # ---------------- documents & accounts ----------------
@@ -268,7 +311,7 @@ def update_account(account_id: int, body: AccountUpdate, db: Session = Depends(g
 @app.get("/accounts")
 def accounts(db: Session = Depends(get_db), user: User = Depends(current_user)):
     counts = dict(db.query(Transaction.account_id, func.count(Transaction.id)).group_by(Transaction.account_id).all())
-    return [{"id": a.id, "name": a.name, "kind": a.kind, "transactions": counts.get(a.id, 0)}
+    return [{"id": a.id, "name": a.name, "kind": a.kind, "purpose": a.purpose or "mixed", "transactions": counts.get(a.id, 0)}
             for a in db.query(FinancialAccount).filter_by(workspace_id=user.workspace_id).order_by(FinancialAccount.name)]
 
 
@@ -328,6 +371,7 @@ def dashboard(fy: str | None = None, db: Session = Depends(get_db), user: User =
 
 @app.get("/transactions")
 def transactions(fy: str | None = None, status: str | None = None, category: str | None = None, account_id: int | None = None,
+                 purpose: str | None = Query(default=None, pattern="^(business|personal|unknown|neutral)$"),
                  q: str | None = Query(default=None, max_length=100), limit: int = Query(default=100, le=1000), offset: int = 0,
                  db: Session = Depends(get_db), user: User = Depends(current_user)):
     query = db.query(Transaction, FinancialAccount).join(FinancialAccount, Transaction.account_id == FinancialAccount.id).filter(FinancialAccount.workspace_id == user.workspace_id)
@@ -341,6 +385,8 @@ def transactions(fy: str | None = None, status: str | None = None, category: str
         query = query.filter(Transaction.category == category)
     if account_id:
         query = query.filter(Transaction.account_id == account_id)
+    if purpose:
+        query = query.filter(Transaction.purpose == purpose)
     if q:
         like = f"%{q}%"
         query = query.filter(or_(Transaction.narration.ilike(like), Transaction.note.ilike(like)))
@@ -349,15 +395,16 @@ def transactions(fy: str | None = None, status: str | None = None, category: str
     return {"total": total, "items": [_tx_json(t, a) for t, a in rows]}
 
 
-def _similar(db: Session, workspace_id: int, row: Transaction):
-    """Other rows from the same counter-party that the user hasn't categorised by hand."""
+def _similar(db: Session, workspace_id: int, row: Transaction, field: str = "category"):
+    """Other rows from the same counter-party and direction that the user hasn't set by hand."""
     key = merchant_key(row.narration)
     if not key:
         return key, []
+    source = Transaction.category_source if field == "category" else Transaction.purpose_source
     candidates = (db.query(Transaction).join(FinancialAccount)
-                  .filter(FinancialAccount.workspace_id == workspace_id, Transaction.id != row.id, Transaction.category_source != "user",
+                  .filter(FinancialAccount.workspace_id == workspace_id, Transaction.id != row.id, source != "user",
                           (Transaction.debit > 0) if row.debit > 0 else (Transaction.credit > 0)).all())
-    return key, [t for t in candidates if merchant_key(t.narration) == key]
+    return key, [t for t in candidates if merchant_key(t.narration) == key and (field == "category" or t.category not in NEUTRAL)]
 
 
 @app.patch("/transactions/{tx_id}")
@@ -373,28 +420,35 @@ def update_transaction(tx_id: int, body: TxUpdate, db: Session = Depends(get_db)
         row.category, row.category_source = body.category, "user"
     elif body.category is not None:
         row.category_source = "user"  # confirming the suggested category clears it from review
+    if body.purpose is not None:
+        if row.category in NEUTRAL:
+            raise HTTPException(400, "Card bill payments and self-transfers are neither business nor personal")
+        changes.append(f"purpose {row.purpose} -> {body.purpose}")
+        row.purpose = body.purpose
+        row.purpose_source = "rule" if body.purpose == "unknown" else "user"
     if body.note is not None:
         changes.append("note updated")
         row.note = body.note.strip() or None
+    field = "purpose" if body.purpose in ("business", "personal") and body.category is None else "category"
+    value = body.purpose if field == "purpose" else body.category
     applied = 0
-    key, similar = _similar(db, user.workspace_id, row)
-    if body.apply_similar and body.category and key:
+    key, similar = _similar(db, user.workspace_id, row, field)
+    if body.apply_similar and value and key:
         for t in similar:
-            t.category, t.category_source = body.category, "user"
+            if field == "category":
+                t.category, t.category_source = value, "user"
+            else:
+                t.purpose, t.purpose_source = value, "user"
         applied = len(similar)
-        rule = db.query(UserRule).filter_by(workspace_id=user.workspace_id, key=key).first()
-        if rule:
-            rule.category = body.category
-        else:
-            db.add(UserRule(workspace_id=user.workspace_id, key=key, category=body.category))
+        _remember(db, user.workspace_id, key, **{field: value})
         changes.append(f"applied to {applied} similar and remembered for '{key}'")
     db.add(AuditEvent(workspace_id=user.workspace_id, action="transaction_updated", detail=f"#{row.id}: {'; '.join(changes) or 'confirmed'}"))
     db.commit()
     reconcile(db, user.workspace_id)
     db.refresh(row)
-    pending = [t for t in similar if t.category != row.category] if not body.apply_similar else []
+    pending = [t for t in similar if getattr(t, field) != value] if value and not body.apply_similar else []
     return {**_tx_json(row, db.get(FinancialAccount, row.account_id)), "applied": applied,
-            "similar": {"key": key, "count": len(pending)} if pending and body.category else None}
+            "similar": {"key": key, "count": len(pending), "field": field, "value": value} if pending else None}
 
 
 @app.get("/reconciliation")
@@ -409,19 +463,25 @@ def reconciliation(fy: str | None = None, db: Session = Depends(get_db), user: U
 
 
 @app.get("/report")
-def report(fy: str | None = None, account_id: int | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    """The working paper for the year; with account_id, the same report for one account only."""
-    rows = fy_transactions(db, user.workspace_id, fy, account_id)
+def report(fy: str | None = None, account_id: int | None = None, purpose: str | None = Query(default=None, pattern="^(business|personal)$"),
+           db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """The working paper for the year; account_id narrows it to one account, purpose to business or personal rows."""
+    rows = fy_transactions(db, user.workspace_id, fy, account_id, purpose)
     t = totals(rows)
-    return {"totals": {k: str(v) for k, v in t.items()}, "categories": category_summary(rows), "flags": flags(rows, fy),
-            "accounts": account_summary(fy_transactions(db, user.workspace_id, fy))}
+    all_rows = fy_transactions(db, user.workspace_id, fy, account_id) if purpose else rows
+    return {"totals": {k: str(v) for k, v in t.items()}, "categories": category_summary(rows),
+            "flags": purpose_flags(all_rows, purpose) + flags(rows, fy),
+            "accounts": account_summary(fy_transactions(db, user.workspace_id, fy, None, purpose)),
+            "purpose_split": purpose_split(all_rows)}
 
 
 @app.get("/export.xlsx")
-def export(fy: str | None = None, account_id: int | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    data = export_xlsx(db, user.workspace_id, fy, account_id)
+def export(fy: str | None = None, account_id: int | None = None, purpose: str | None = Query(default=None, pattern="^(business|personal)$"),
+           db: Session = Depends(get_db), user: User = Depends(current_user)):
+    ws = db.get(Workspace, user.workspace_id)
+    data = export_xlsx(db, user.workspace_id, fy, account_id, purpose, bool(ws.business_mode))
     account = db.query(FinancialAccount).filter_by(id=account_id, workspace_id=user.workspace_id).first() if account_id else None
     suffix = "-" + re.sub(r"[^A-Za-z0-9]+", "-", account.name).strip("-") if account else ""
-    name = f"ledgervault-working-paper-{fy or 'all'}{suffix}.xlsx"
+    name = f"ledgervault-{purpose + '-' if purpose else ''}working-paper-{fy or 'all'}{suffix}.xlsx"
     return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})

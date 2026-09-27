@@ -3,7 +3,19 @@ import { useEffect, useRef, useState } from "react";
 import { money, amountOf, STATUS_LABEL, type Api, type Dash, type Tx, type Category, type Account, type Doc, type FileResult, type Flag } from "./lib";
 import type { ViewId } from "./page";
 
-type ViewProps = { api: Api; fy: string; version: number; refresh: () => void; go: (v: ViewId, filter?: string) => void };
+type ViewProps = { api: Api; fy: string; version: number; refresh: () => void; go: (v: ViewId, filter?: string) => void; businessMode: boolean };
+const PURPOSE_LABEL: Record<string, string> = { business: "Business", personal: "Personal", unknown: "Unknown", neutral: "—" };
+
+function PurposeSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  if (value === "neutral") return <span className="muted" title="Card bill payments and self-transfers are neither">—</span>;
+  return (
+    <select className={`purpose ${value}`} value={value} onChange={e => onChange(e.target.value)} aria-label="Purpose">
+      <option value="business">Business</option>
+      <option value="personal">Personal</option>
+      <option value="unknown">Unknown</option>
+    </select>
+  );
+}
 const q = (fy: string) => (fy ? `fy=${encodeURIComponent(fy)}` : "");
 
 function Flags({ flags }: { flags: Flag[] }) {
@@ -89,7 +101,7 @@ type Hints = { name: string; dob: string; pan: string; extras: string };
 const HINTS_KEY = "ledger_pdf_hints";
 const emptyHints: Hints = { name: "", dob: "", pan: "", extras: "" };
 
-export function Upload({ api, version, refresh, go }: ViewProps) {
+export function Upload({ api, version, refresh, go, businessMode }: ViewProps) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [docs, setDocs] = useState<Doc[] | null>(null);
   const [account, setAccount] = useState("");
@@ -224,7 +236,7 @@ export function Upload({ api, version, refresh, go }: ViewProps) {
           </ul>
         )}
       </section>
-      {reviewDocs.length > 0 && <ImportReview api={api} docIds={reviewDocs} onDone={() => { setReviewDocs([]); setResults([]); refresh(); go("overview"); }} onChange={refresh} />}
+      {reviewDocs.length > 0 && <ImportReview api={api} businessMode={businessMode} docIds={reviewDocs} onDone={() => { setReviewDocs([]); setResults([]); refresh(); go("overview"); }} onChange={refresh} />}
       <details className="panel help">
         <summary>Where do I get these files?</summary>
         <ul>
@@ -259,22 +271,25 @@ export function Upload({ api, version, refresh, go }: ViewProps) {
 
 // ---------------- Post-upload review ----------------
 
-type ReviewGroup = { key: string; example: string; category: string; direction: "in" | "out"; count: number; total: string; tx_ids: number[]; needs_review: boolean; confirmed: boolean };
-type ReviewStatement = { document_id: number; filename: string; account_id: number; account: string; kind: string; transactions: number; period: string | null };
+type ReviewGroup = { key: string; example: string; category: string; purpose: string; direction: "in" | "out"; count: number; total: string; tx_ids: number[]; needs_review: boolean; confirmed: boolean };
+type ReviewStatement = { document_id: number; filename: string; account_id: number; account: string; kind: string; purpose?: string; transactions: number; period: string | null };
 
-function ImportReview({ api, docIds, onDone, onChange }: { api: Api; docIds: number[]; onDone: () => void; onChange: () => void }) {
+function ImportReview({ api, docIds, onDone, onChange, businessMode }: { api: Api; docIds: number[]; onDone: () => void; onChange: () => void; businessMode: boolean }) {
   const [data, setData] = useState<{ statements: ReviewStatement[]; groups: ReviewGroup[] }>();
   const [cats, setCats] = useState<Category[]>([]);
   const [choice, setChoice] = useState<Record<number, string>>({});
+  const [purposeChoice, setPurposeChoice] = useState<Record<number, string>>({});
+  const [accountPurpose, setAccountPurpose] = useState<Record<number, string>>({});
+  useEffect(() => { api.get<Account[]>("/accounts").then(as => setAccountPurpose(Object.fromEntries(as.map(a => [a.id, a.purpose])))).catch(() => {}); }, [api, docIds.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
   const [remember, setRemember] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [names, setNames] = useState<Record<number, string>>({});
-  const load = () => api.get<{ statements: ReviewStatement[]; groups: ReviewGroup[] }>(`/imports/review?docs=${docIds.join(",")}`).then(d => { setData(d); setChoice({}); }).catch(e => setError(e.message));
+  const load = () => api.get<{ statements: ReviewStatement[]; groups: ReviewGroup[] }>(`/imports/review?docs=${docIds.join(",")}`).then(d => { setData(d); setChoice({}); setPurposeChoice({}); }).catch(e => setError(e.message));
   useEffect(() => { api.get<Category[]>("/categories").then(setCats).catch(() => {}); }, [api]);
   useEffect(() => { load(); }, [docIds.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const saveAccount = async (s: ReviewStatement, body: { name?: string; kind?: string }) => {
+  const saveAccount = async (s: ReviewStatement, body: { name?: string; kind?: string; purpose?: string }) => {
     setError("");
     try { await api.patch(`/accounts/${s.account_id}`, body); await load(); onChange(); } catch (e) { setError((e as Error).message); }
   };
@@ -283,7 +298,9 @@ function ImportReview({ api, docIds, onDone, onChange }: { api: Api; docIds: num
     setBusy(true); setError("");
     const groups = data.groups.map((g, i) => {
       const category = choice[i] ?? g.category;
-      return { tx_ids: g.tx_ids, category, remember_key: remember && g.key && category !== g.category ? g.key : null };
+      const purpose = purposeChoice[i];
+      return { tx_ids: g.tx_ids, category, remember_key: remember && g.key && category !== g.category ? g.key : null,
+               purpose: purpose ?? null, remember_purpose_key: remember && g.key && purpose && purpose !== g.purpose ? g.key : null };
     });
     try { await api.post("/imports/confirm", { groups }); onDone(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
@@ -296,13 +313,15 @@ function ImportReview({ api, docIds, onDone, onChange }: { api: Api; docIds: num
       <p className="muted">Check what was detected, fix anything that's wrong, then confirm. Groups that need a decision are listed first.</p>
       <h3>Statements</h3>
       <div className="scroll"><table>
-        <thead><tr><th>File</th><th>Filed under account</th><th>Type</th><th>Period</th><th className="num">Rows</th></tr></thead>
+        <thead><tr><th>File</th><th>Filed under account</th><th>Type</th>{businessMode && <th>Used for</th>}<th>Period</th><th className="num">Rows</th></tr></thead>
         <tbody>{data.statements.map(s => (
           <tr key={s.document_id}>
             <td>{s.filename}</td>
             <td><input className="acct" value={names[s.account_id] ?? s.account} onChange={e => setNames(n => ({ ...n, [s.account_id]: e.target.value }))}
               onBlur={e => e.target.value.trim() && e.target.value !== s.account && saveAccount(s, { name: e.target.value })} /></td>
             <td><select value={s.kind} onChange={e => saveAccount(s, { kind: e.target.value })}><option value="bank">Bank</option><option value="card">Credit card</option></select></td>
+            {businessMode && <td><select value={accountPurpose[s.account_id] ?? "mixed"} onChange={e => { setAccountPurpose(p => ({ ...p, [s.account_id]: e.target.value })); saveAccount(s, { purpose: e.target.value }); }}>
+              <option value="mixed">Mixed</option><option value="business">Business</option><option value="personal">Personal</option></select></td>}
             <td className="nowrap">{s.period?.replace(" to ", " → ")}</td>
             <td className="num">{s.transactions}</td>
           </tr>
@@ -310,7 +329,7 @@ function ImportReview({ api, docIds, onDone, onChange }: { api: Api; docIds: num
       </table></div>
       <h3>Categories</h3>
       <div className="scroll"><table className="groups">
-        <thead><tr><th>Payee / description</th><th className="num">Count</th><th className="num">Amount</th><th>Category</th></tr></thead>
+        <thead><tr><th>Payee / description</th><th className="num">Count</th><th className="num">Amount</th><th>Category</th>{businessMode && <th>Purpose</th>}</tr></thead>
         <tbody>{data.groups.map((g, i) => {
           const current = choice[i] ?? g.category;
           return (
@@ -321,6 +340,7 @@ function ImportReview({ api, docIds, onDone, onChange }: { api: Api; docIds: num
               <td><select value={current} onChange={e => setChoice(c => ({ ...c, [i]: e.target.value }))} className={choice[i] ? "userset" : ""}>
                 {cats.map(c => <option key={c.key} value={c.key}>{c.label}</option>)}
               </select></td>
+              {businessMode && <td><PurposeSelect value={purposeChoice[i] ?? g.purpose} onChange={v => setPurposeChoice(c => ({ ...c, [i]: v }))} /></td>}
             </tr>
           );
         })}</tbody>
@@ -338,12 +358,13 @@ function ImportReview({ api, docIds, onDone, onChange }: { api: Api; docIds: num
 
 // ---------------- Transactions ----------------
 
-export function Transactions({ api, fy, version, initialStatus }: ViewProps & { initialStatus: string }) {
+export function Transactions({ api, fy, version, initialStatus, businessMode }: ViewProps & { initialStatus: string }) {
   const [items, setItems] = useState<Tx[] | null>(null);
   const [total, setTotal] = useState(0);
   const [cats, setCats] = useState<Category[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [status, setStatus] = useState(initialStatus.startsWith("category:") ? "" : initialStatus);
+  const [status, setStatus] = useState(initialStatus.startsWith("category:") || initialStatus.startsWith("purpose:") ? "" : initialStatus);
+  const [purpose, setPurpose] = useState(initialStatus.startsWith("purpose:") ? initialStatus.slice(8) : "");
   const [category, setCategory] = useState(initialStatus.startsWith("category:") ? initialStatus.slice(9) : "");
   const [account, setAccount] = useState("");
   const [search, setSearch] = useState("");
@@ -353,28 +374,30 @@ export function Transactions({ api, fy, version, initialStatus }: ViewProps & { 
   const PAGE = 100;
 
   useEffect(() => { api.get<Category[]>("/categories").then(setCats).catch(() => {}); api.get<Account[]>("/accounts").then(setAccounts).catch(() => {}); }, [api]);
-  useEffect(() => { setPage(0); }, [status, category, account, search, fy]);
+  useEffect(() => { setPage(0); }, [status, category, account, search, fy, purpose]);
   useEffect(() => {
     const params = new URLSearchParams({ limit: String(PAGE), offset: String(page * PAGE) });
     if (fy) params.set("fy", fy);
     if (status) params.set("status", status);
     if (category) params.set("category", category);
     if (account) params.set("account_id", account);
+    if (purpose) params.set("purpose", purpose);
     if (search.trim()) params.set("q", search.trim());
     const t = setTimeout(() => api.get<{ items: Tx[]; total: number }>(`/transactions?${params}`).then(r => { setItems(r.items); setTotal(r.total); }).catch(e => setError(e.message)), 200);
     return () => clearTimeout(t);
-  }, [api, fy, version, status, category, account, search, page, tick]);
+  }, [api, fy, version, status, category, account, search, page, tick, purpose]);
 
-  const [similar, setSimilar] = useState<{ tx: Tx; category: string; key: string; count: number } | null>(null);
+  type Similar = { key: string; count: number; field: "category" | "purpose"; value: string };
+  const [similar, setSimilar] = useState<(Similar & { tx: Tx }) | null>(null);
   const [flash, setFlash] = useState("");
-  const update = async (t: Tx, body: { category?: string; note?: string; apply_similar?: boolean }) => {
+  const update = async (t: Tx, body: { category?: string; purpose?: string; note?: string; apply_similar?: boolean }) => {
     setError(""); setFlash("");
     try {
-      const updated = await api.patch<Tx & { similar: { key: string; count: number } | null; applied: number }>(`/transactions/${t.id}`, body);
+      const updated = await api.patch<Tx & { similar: Similar | null; applied: number }>(`/transactions/${t.id}`, body);
       setItems(list => list && list.map(x => (x.id === t.id ? updated : x)));
-      if (body.apply_similar) { setSimilar(null); setFlash(`Updated ${updated.applied} similar transaction${updated.applied === 1 ? "" : "s"}. Future uploads from this payee will use this category too.`); setTick(v => v + 1); return; }
-      if (body.category) setSimilar(updated.similar ? { tx: updated, category: body.category, ...updated.similar } : null);
-      if (body.category && status && !updated.similar) setTimeout(() => setTick(v => v + 1), 600);
+      if (body.apply_similar) { setSimilar(null); setFlash(`Updated ${updated.applied} similar transaction${updated.applied === 1 ? "" : "s"}. Future uploads from this payee will get the same ${body.purpose ? "purpose" : "category"}.`); setTick(v => v + 1); return; }
+      if (body.category || body.purpose) setSimilar(updated.similar ? { tx: updated, ...updated.similar } : null);
+      if ((body.category || body.purpose) && (status || purpose) && !updated.similar) setTimeout(() => setTick(v => v + 1), 600);
     } catch (e) { setError((e as Error).message); }
   };
 
@@ -398,12 +421,20 @@ export function Transactions({ api, fy, version, initialStatus }: ViewProps & { 
           <option value="">All accounts</option>
           {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
+        {businessMode && (
+          <select value={purpose} onChange={e => setPurpose(e.target.value)} aria-label="Purpose filter">
+            <option value="">Business & personal</option>
+            <option value="business">Business only</option>
+            <option value="personal">Personal only</option>
+            <option value="unknown">Purpose: Unknown</option>
+          </select>
+        )}
       </div>
       {error && <p className="error">{error}</p>}
       {similar && (
         <div className="similar">
-          <span><b>{similar.count}</b> more transaction{similar.count === 1 ? "" : "s"} look like “{similar.key}”. Set them all to <b>{cats.find(c => c.key === similar.category)?.label ?? similar.category}</b> and remember it for future uploads?</span>
-          <span className="actions tight"><button onClick={() => update(similar.tx, { category: similar.category, apply_similar: true })}>Apply to all</button><button className="secondary" onClick={() => { setSimilar(null); if (status) setTick(v => v + 1); }}>Just this one</button></span>
+          <span><b>{similar.count}</b> more transaction{similar.count === 1 ? "" : "s"} look like “{similar.key}”. Set them all to <b>{similar.field === "purpose" ? PURPOSE_LABEL[similar.value] : cats.find(c => c.key === similar.value)?.label ?? similar.value}</b> and remember it for future uploads?</span>
+          <span className="actions tight"><button onClick={() => update(similar.tx, { [similar.field]: similar.value, apply_similar: true })}>Apply to all</button><button className="secondary" onClick={() => { setSimilar(null); if (status) setTick(v => v + 1); }}>Just this one</button></span>
         </div>
       )}
       {flash && <p className="notice">{flash}</p>}
@@ -412,7 +443,7 @@ export function Transactions({ api, fy, version, initialStatus }: ViewProps & { 
         <div className="panelhead"><h2>{total} transactions</h2><span>Showing {items?.length ? page * PAGE + 1 : 0}–{page * PAGE + (items?.length ?? 0)}</span></div>
         {!items ? <div className="empty">Loading…</div> : items.length === 0 ? <div className="empty">No transactions match these filters.</div> : (
           <div className="scroll"><table className="txtable">
-            <thead><tr><th>Date</th><th>Description</th><th className="num">Amount</th><th>Category</th><th>Status</th><th>Note</th></tr></thead>
+            <thead><tr><th>Date</th><th>Description</th><th className="num">Amount</th><th>Category</th>{businessMode && <th>Purpose</th>}<th>Status</th><th>Note</th></tr></thead>
             <tbody>{items.map(t => (
               <tr key={t.id}>
                 <td className="nowrap">{t.date}</td>
@@ -424,6 +455,7 @@ export function Transactions({ api, fy, version, initialStatus }: ViewProps & { 
                   </select>
                   {t.status === "needs_review" && <button className="link small" onClick={() => update(t, { category: t.category })}>Confirm</button>}
                 </td>
+                {businessMode && <td><PurposeSelect value={t.purpose} onChange={v => update(t, { purpose: v })} /></td>}
                 <td><StatusTag status={t.status} /></td>
                 <td><NoteInput value={t.note ?? ""} onSave={note => update(t, { note })} /></td>
               </tr>
@@ -516,31 +548,44 @@ const GROUP_LABEL: Record<string, string> = { income: "Income", tax: "Tax paid",
 
 type AccountLine = { account_id: number; account: string; kind: string; count: number; inflow: string; outflow: string; refunds: string; neutral: string; exceptions: number; from: string; to: string };
 
-export function Report({ api, fy, version, go }: ViewProps) {
-  const [data, setData] = useState<ReportData & { accounts: AccountLine[] }>();
+type PurposeSplit = Record<"business" | "personal" | "unknown", { count: number; inflow: string; outflow: string }>;
+
+export function Report({ api, fy, version, go, businessMode }: ViewProps) {
+  const [data, setData] = useState<ReportData & { accounts: AccountLine[]; purpose_split: PurposeSplit }>();
   const [accountId, setAccountId] = useState<string>("");
+  const [scope, setScope] = useState<"" | "business" | "personal">("");
+  useEffect(() => { if (!businessMode) setScope(""); }, [businessMode]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
     const params = new URLSearchParams();
     if (fy) params.set("fy", fy);
     if (accountId) params.set("account_id", accountId);
-    api.get<ReportData & { accounts: AccountLine[] }>(`/report?${params}`).then(setData).catch(e => setError(e.message));
-  }, [api, fy, version, accountId]);
+    if (scope) params.set("purpose", scope);
+    api.get<ReportData & { accounts: AccountLine[]; purpose_split: PurposeSplit }>(`/report?${params}`).then(setData).catch(e => setError(e.message));
+  }, [api, fy, version, accountId, scope]);
   const selected = data?.accounts.find(a => String(a.account_id) === accountId);
   const download = async () => {
     setBusy(true); setError("");
     const params = new URLSearchParams();
     if (fy) params.set("fy", fy);
     if (accountId) params.set("account_id", accountId);
+    if (scope) params.set("purpose", scope);
     const suffix = selected ? `-${selected.account.replace(/[^A-Za-z0-9]+/g, "-")}` : "";
-    try { await api.download(`/export.xlsx?${params}`, `ledgervault-working-paper-${fy || "all"}${suffix}.xlsx`); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+    try { await api.download(`/export.xlsx?${params}`, `ledgervault-${scope ? scope + "-" : ""}working-paper-${fy || "all"}${suffix}.xlsx`); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
   return (
     <>
       <header>
-        <div><p className="eyebrow">For your CA {fy && `· FY ${fy}`}</p><h1>Working paper</h1></div>
+        <div><p className="eyebrow">For your CA {fy && `· FY ${fy}`}</p><h1>{scope === "business" ? "Business working paper" : scope === "personal" ? "Personal working paper" : "Working paper"}</h1></div>
         <div className="actions tight">
+          {businessMode && (
+            <select value={scope} onChange={e => setScope(e.target.value as "" | "business" | "personal")} aria-label="Business or personal">
+              <option value="">Business & personal</option>
+              <option value="business">Business only</option>
+              <option value="personal">Personal only</option>
+            </select>
+          )}
           <select value={accountId} onChange={e => setAccountId(e.target.value)} aria-label="Report scope">
             <option value="">All accounts</option>
             {data?.accounts.map(a => <option key={a.account_id} value={a.account_id}>{a.account}</option>)}
@@ -555,10 +600,19 @@ export function Report({ api, fy, version, go }: ViewProps) {
       {data && (
         <>
           <div className="metrics three">
-            <article><p>Money in</p><strong>{money(data.totals.inflow)}</strong></article>
-            <article><p>Money out (net)</p><strong>{money(data.totals.outflow)}</strong></article>
-            <article><p>Neutral (excluded)</p><strong>{money(data.totals.neutral)}</strong></article>
+            <article><p>{scope === "business" ? "Business receipts" : "Money in"}</p><strong>{money(data.totals.inflow)}</strong></article>
+            <article><p>{scope === "business" ? "Business expenses (net)" : "Money out (net)"}</p><strong>{money(data.totals.outflow)}</strong></article>
+            {scope
+              ? <article className="clickable" onClick={() => go("transactions", "purpose:unknown")}><p>Purpose not set</p><strong>{data.purpose_split.unknown.count}</strong><small>Excluded until you choose. Click to review →</small></article>
+              : <article><p>Neutral (excluded)</p><strong>{money(data.totals.neutral)}</strong></article>}
           </div>
+          {businessMode && !scope && (
+            <div className="metrics three">
+              <article className="clickable" onClick={() => setScope("business")}><p>Business</p><strong>{money(data.purpose_split.business.outflow)}</strong><small>out · {money(data.purpose_split.business.inflow)} in · {data.purpose_split.business.count} txns</small></article>
+              <article className="clickable" onClick={() => setScope("personal")}><p>Personal</p><strong>{money(data.purpose_split.personal.outflow)}</strong><small>out · {money(data.purpose_split.personal.inflow)} in · {data.purpose_split.personal.count} txns</small></article>
+              <article className="clickable" onClick={() => go("transactions", "purpose:unknown")}><p>Purpose not set</p><strong>{data.purpose_split.unknown.count}</strong><small>Click to decide →</small></article>
+            </div>
+          )}
           {!selected && data.accounts.length > 0 && (
             <section className="panel">
               <div className="panelhead"><h2>By account</h2><span>Click an account to see its own report</span></div>
@@ -596,6 +650,71 @@ export function Report({ api, fy, version, go }: ViewProps) {
             </table></div>
           </section>
         </>
+      )}
+    </>
+  );
+}
+
+// ---------------- Settings ----------------
+
+export function Settings({ api, version, refresh, go, businessMode, onBusinessMode }: ViewProps & { onBusinessMode: (v: boolean) => void }) {
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState("");
+  useEffect(() => { api.get<Account[]>("/accounts").then(setAccounts).catch(e => setError(e.message)); }, [api, version]);
+  const toggle = async (on: boolean) => {
+    setError("");
+    try { const r = await api.patch<{ business_mode: boolean }>("/settings", { business_mode: on }); onBusinessMode(r.business_mode); } catch (e) { setError((e as Error).message); }
+  };
+  const setPurpose = async (a: Account, purpose: string) => {
+    setError(""); setSaved("");
+    try {
+      await api.patch(`/accounts/${a.id}`, { purpose });
+      setAccounts(list => list.map(x => (x.id === a.id ? { ...x, purpose } : x)));
+      setSaved(`${a.name} is now marked ${purpose}. Suggestions were updated; your own choices were kept.`);
+      refresh();
+    } catch (e) { setError((e as Error).message); }
+  };
+  return (
+    <>
+      <header><div><p className="eyebrow">Workspace</p><h1>Settings</h1></div></header>
+      {error && <p className="error">{error}</p>}
+      <section className="panel">
+        <div className="panelhead"><h2>Business expenses</h2></div>
+        <label className="check big">
+          <input type="checkbox" checked={businessMode} onChange={e => toggle(e.target.checked)} />
+          <span><b>Track business and personal separately</b><small className="muted block">For freelancers, consultants and business owners. Every transaction gets a purpose (Business, Personal or Unknown), and the report can be limited to business only. Salaried with no side business? Leave this off.</small></span>
+        </label>
+      </section>
+      {businessMode && (
+        <section className="panel">
+          <div className="panelhead"><h2>What is each account used for?</h2><span>Sets the starting suggestion for every transaction</span></div>
+          <ul className="explainlist">
+            <li><b>Business:</b> everything counts as business, except clearly personal items (salary, dividends, investments, school fees, donations).</li>
+            <li><b>Personal:</b> everything counts as personal, except clearly business items (software/cloud, ads, courier, coworking, professional fees, GST, gateway receipts), so an AWS bill on a personal card still counts.</li>
+            <li><b>Mixed:</b> decided per transaction from its category and description. Genuinely unclear ones (fuel, travel, UPI to people, cash) stay <i>Unknown</i> for you to choose.</li>
+          </ul>
+          {saved && <p className="notice">{saved}</p>}
+          {accounts.length === 0 ? <div className="empty">Upload statements first.</div> : (
+            <div className="scroll"><table>
+              <thead><tr><th>Account</th><th>Type</th><th className="num">Transactions</th><th>Used for</th></tr></thead>
+              <tbody>{accounts.map(a => (
+                <tr key={a.id}>
+                  <td><b>{a.name}</b></td>
+                  <td>{a.kind === "card" ? "Credit card" : "Bank"}</td>
+                  <td className="num">{a.transactions}</td>
+                  <td><div className="toggle small">
+                    {["business", "mixed", "personal"].map(p => <button key={p} type="button" className={a.purpose === p ? "on" : ""} onClick={() => setPurpose(a, p)}>{p[0].toUpperCase() + p.slice(1)}</button>)}
+                  </div></td>
+                </tr>
+              ))}</tbody>
+            </table></div>
+          )}
+          <div className="actions">
+            <button className="secondary" onClick={() => go("transactions", "purpose:unknown")}>Review transactions with no purpose →</button>
+            <button className="secondary" onClick={() => go("report")}>Open the business report →</button>
+          </div>
+        </section>
       )}
     </>
   );

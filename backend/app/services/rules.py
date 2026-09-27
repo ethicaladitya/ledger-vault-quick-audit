@@ -18,6 +18,7 @@ CATEGORIES = {
     "refund_reversal": ("Refund / reversal / cashback", "adjustment", "Usually not income; reduces the related expense"),
     "cash_deposit": ("Cash deposit", "review", "Cash deposits ≥ ₹10 lakh/FY are reported to the IT dept (SFT) — keep source evidence"),
     "tax_payment": ("Income tax / TDS paid", "tax", "Claim as advance / self-assessment tax — match with 26AS challans"),
+    "gst_payment": ("GST paid", "tax", "GST paid via challan — reconcile with GSTR-3B; not an income-tax deduction by itself"),
     "investment": ("Investment (MF, stocks, PPF, NPS, FD)", "investment", "Possible 80C / 80CCD, and capital-gains cost basis"),
     "insurance": ("Insurance premium", "deduction_hint", "Life → possible 80C; health → possible 80D (old regime)"),
     "loan_emi": ("Loan EMI", "deduction_hint", "Home loan: interest 24(b), principal 80C — need lender certificate"),
@@ -37,6 +38,11 @@ CATEGORIES = {
     "entertainment": ("Entertainment & subscriptions", "expense", ""),
     "bank_charges": ("Bank / card charges", "expense", ""),
     "card_purchase": ("Card purchase (other merchant)", "expense", ""),
+    "software": ("Software & cloud services", "expense", "Business expense if used for work — keep invoices (GST input credit if registered)"),
+    "advertising": ("Advertising & marketing", "expense", "Business expense — keep ad invoices"),
+    "professional_services": ("Professional & contractor fees", "expense", "Business expense — TDS u/s 194J may apply above thresholds"),
+    "office": ("Office, coworking & stationery", "expense", "Business expense — keep invoices"),
+    "courier": ("Courier & logistics", "expense", "Business expense — keep invoices"),
     "bill_payment": ("Bill payment via BBPS / BillPay", "review", "Often a credit-card bill — pick 'Credit card bill payment' if so, otherwise Utilities"),
     "auto_debit": ("Auto-debit (NACH / ECS / standing instruction)", "review", "Usually an EMI, SIP or insurance premium — pick the right one"),
     "upi_transfer": ("UPI payment / receipt (unidentified)", "review", "Identify the counter-party"),
@@ -48,7 +54,7 @@ REVIEW = {c for c, (_, group, _) in CATEGORIES.items() if group == "review"}
 
 D, C, A = "debit", "credit", "any"
 # Bump when rules change: rows categorised by rules (not by the user) are re-classified on start-up.
-RULES_VERSION = 3
+RULES_VERSION = 4
 
 # Narration codes: HDFC ATW (own ATM) / NWD, EAW (other ATM), ICICI VPS/IPS (debit card), BIL (bill pay),
 # INF (linked-account transfer), MMT (IMPS), EBA (ICICI Direct), NFS (shared ATM network), ICCW (UPI cash
@@ -65,9 +71,16 @@ RULES = [
     (DIV, "dividend", C),
     (r"interest|\bint\.? ?(pd|paid|cr|credit)\b|\bsb int\b|\bint on\b", "interest_income", C),
     (r"^ach c\b|\bach c-|\bach cr\b|\bnach cr\b|\becs cr\b|\bnach c\b", "dividend", C),
+    (r"razorpay|cashfree|\bpayu\b|stripe|paypal|instamojo|ccavenue|settlement|upwork|fiverr|invoice|\binv ?no\b|gst ?refund", "business_receipt", C),
     (r"\brent\b", "rental_income", C),
     (r"cash dep|by cash|cash deposit|\bcdm\b", "cash_deposit", C),
+    (r"\bgst\b.*(challan|pmt|payment|cpin)|gst ?challan|\bcpin\b|\bgstn\b|gst portal", "gst_payment", D),
     (r"\btds\b|advance tax|self assessment|income ?tax|oltas|cbdt|challan ?280|tin ?nsdl|e-?pay tax", "tax_payment", D),
+    (r"\baws\b|amazon web services|google ?cloud|gsuite|g suite|google ?workspace|microsoft|msft|azure|office ?365|adobe|zoho|tally|github|gitlab|atlassian|\bjira\b|notion|figma|canva|slack|\bzoom\b|openai|chatgpt|anthropic|claude\.ai|digitalocean|linode|vercel|netlify|heroku|cloudflare|godaddy|hostinger|namecheap|bigrock|freshworks|hubspot|mailchimp|dropbox|1password", "software", D),
+    (r"facebk|facebook ?ads|fb ?ads|meta ?(ads|platforms)|google ?ads|adwords|linkedin ?ads|instagram ads|twitter ads", "advertising", D),
+    (r"delhivery|blue ?dart|dtdc|shiprocket|ecom express|xpressbees|\bporter\b|borzo|india post|speed post", "courier", D),
+    (r"wework|awfis|91springboard|innov8|cowork|stationery|office ?supplies|printing|xerox", "office", D),
+    (r"consult|professional fee|legal|advocate|chartered accountant|\bca fees?\b|audit fee|upwork|fiverr|freelanc|contractor|retainer", "professional_services", D),
     (r"\bsip\b|mutual ?fund|\bmf\b|zerodha|groww|upstox|kuvera|coin by|\bppf\b|\bnps\b|fixed deposit|\bfd\b|\brd\b|bse ltd|bse limited|nse clearing|indian clearing|\biccl\b|smallcase|paytm money|\bcams\b|kfintech|^eba/", "investment", D),
     (r"insurance|\blic\b|premium|policy ?bazaar|star health|hdfc ergo|icici lombard|niva bupa|care health|acko|digit insur", "insurance", D),
     (r"\bemi\b|\bloan\b|bajaj fin|home ?loan|housing fin", "loan_emi", D),

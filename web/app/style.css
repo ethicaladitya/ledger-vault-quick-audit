@@ -162,3 +162,12 @@ tr.clickable:hover td { background: var(--paper); }
 .noteedit { display: flex; align-items: center; gap: 6px; }
 .noteedit small { white-space: nowrap; font-size: 12px; }
 header .actions.tight select { padding: 10px; }
+.check.big { align-items: flex-start; gap: 12px; font-weight: 400; margin-top: 8px; }
+.check.big input { margin-top: 3px; width: 18px; height: 18px; }
+.explainlist { line-height: 1.6; padding-left: 20px; color: #43514b; }
+.toggle.small { display: inline-flex; }
+.toggle.small button { padding: 7px 12px; font-size: 13px; }
+select.purpose { padding: 6px 8px; font-size: 13px; }
+select.purpose.business { border-color: #3b6fb6; background: #eef3fb; }
+select.purpose.personal { border-color: #9a6a2f; background: #fbf5ec; }
+select.purpose.unknown { border-style: dashed; }

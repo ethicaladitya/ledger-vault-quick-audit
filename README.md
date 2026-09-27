@@ -16,6 +16,8 @@ It's self-hosted, so your financial data never leaves your machine or server.
 - **Opens password-protected PDFs.** Enter your name, date of birth and PAN once, and it tries the formulas Indian banks use (e.g. `PRIY0512` = first 4 letters of name + DDMM, or PAN + date of birth). If none works, you type that file's password. Your details are never saved on the server.
 - **Understands Indian bank formats.** HDFC, ICICI, SBI, Axis, Kotak, IDFC and others. It skips the account-details header block, handles "Withdrawal Amt." / "Deposit Amt." or Amount + Dr/Cr columns, lakh-style numbers, multi-line narrations and footer totals. For PDFs it uses the running balance to tell debits from credits.
 - **Categorises automatically, and learns.** Salary, interest, dividends (including `ACH C-` NACH payouts and `FINALDIV`/`INTDIV` codes), rent, insurance, investments, EMIs, tax, CRED bill payments, card purchases, cash withdrawals, food, travel and more. Narration codes like `POS`, `NWD`, `ATW`, `UPICashWDL`, `BIL/`, `INF/` and `ACH D-` are understood. Correct one payee and it offers to fix every similar row and remember it for next year.
+- **Separates business from personal (optional).** Freelancer or business owner? Switch on business tracking and every transaction gets a purpose. Say what each account is used for (Business / Personal / Mixed); business-by-nature spends like AWS, Google Workspace, ads, courier, coworking, professional fees, GST and payment-gateway receipts are detected on any account, and genuinely unclear ones (fuel, UPI to a person, cash) are left for you to decide. Then produce a **business-only** report and Excel.
+- **Never double-counts the same statement.** Re-uploading a file does nothing, and uploading the same period again as PDF and Excel, or re-downloaded, is recognised even when it would have landed in a different account. It's merged, with a note.
 - **You confirm before anything counts.** After each upload, a review screen shows the detected accounts and the suggested categories grouped by payee (e.g. "REC LIMITED · 6 credits · Dividend"). Change what's wrong, then click **Confirm all**.
 - **Never double-counts.** Paying your credit-card bill isn't an expense; the purchases on the card are. LedgerVault matches each bank payment to the card statement and does the same for transfers between your own accounts.
 - **Runs an audit for you.** It flags things you'd rather hear from it than from a tax notice:
@@ -85,7 +87,9 @@ On the server: `git pull && ./deploy.sh`. From your laptop: `./remote-deploy.sh 
 4. **Overview** shows money in and out and the **audit findings** for the year you pick in the sidebar.
 5. **Transactions → Needs attention**: choose a category for each flagged row (or click **Confirm**), and add notes like *"loan from father"* for your CA.
 6. **Reconciliation** shows which card payments and transfers were matched, and what's still missing.
-7. **Report & export → Download Excel**, and send it to your CA with your Form 16, AIS and 26AS.
+7. **Report & export → Download Excel**, and send it to your CA with your Form 16, AIS and 26AS. Pick an account in the dropdown for a per-account report, or use the **By account** table.
+
+**Have business income too?** Go to **Settings**, turn on *Track business and personal separately*, and mark each account as Business, Personal or Mixed. Transactions then get a **Purpose** column (with "apply to all similar"), the upload review lets you set purpose per payee, and **Report & export → Business only** gives a working paper and Excel with just your business receipts and expenses. It also tells you how many transactions were excluded because their purpose isn't set yet.
 
 ---
 
@@ -139,6 +143,7 @@ In short: **`setup.sh` the first time, then `deploy.sh` (on the server) or `remo
 | `backend/app/services/ingestion.py` | Reads PDF/CSV/XLS/XLSX/ZIP, finds the header row, maps bank column names, parses dates and amounts, and files each statement under an account |
 | `backend/app/services/pdf.py` | Unlocks PDFs, detects bank vs card, the bank and last 4 digits, and extracts transactions from tables or text lines |
 | `backend/app/services/passwords.py` | Builds candidate PDF passwords from your name, date of birth and PAN using common bank formulas |
+| `backend/app/services/purpose.py` | Business / personal / unknown suggestion for each transaction (account use + category + narration + what you taught it) |
 | `backend/app/services/rules.py` | The categories, their ITR notes, the narration rules that assign them, and the payee key used for learning |
 | `backend/app/services/reconciliation.py` | Matches card bill payments and self-transfers across accounts |
 | `backend/app/services/report.py` | Year totals, audit findings and the Excel export |
@@ -181,6 +186,12 @@ No. They're sent with the upload, used to try PDF passwords, and discarded. Noth
 
 **A PDF imported with the wrong numbers.**
 PDF layouts vary between banks. Check the warnings under the file on the Upload page (e.g. rows that don't follow the running balance), delete the statement, and upload the Excel/CSV version if your bank offers one. Please report the bank so its layout can be supported.
+
+**Do notes change the category?**
+No. Notes are free text for your CA and appear in the Excel export. To clear a row from "Needs attention", pick a category or click **Confirm**. A note is saved when you click **Save**, press Enter or click away; you'll see "Saved ✓".
+
+**How is a transaction marked business or personal?**
+Your own choice always wins, then payees you've taught with "apply to all similar", then the account's use from Settings, then the category and description. Anything unclear stays *Unknown* and is listed as excluded in the business report, so nothing silently disappears.
 
 **What does "Needs attention" mean?**
 Either the category is unclear (UPI or NEFT to a person, an unknown narration), or a card payment or transfer has no matching entry on another uploaded statement.

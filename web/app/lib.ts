@@ -4,10 +4,10 @@ export type Tx = {
   id: number; date: string; narration: string; debit: string; credit: string; balance: string | null;
   category: string; category_label: string; group: string; itr_hint: string; category_source: string; note: string | null;
   status: string; match_group: string | null; financial_year: string; account_id: number; account: string; account_kind: string;
-  document_id: number; source_row: number;
+  document_id: number; source_row: number; purpose: string; purpose_source: string;
 };
 export type Category = { key: string; label: string; group: string; itr_hint: string };
-export type Account = { id: number; name: string; kind: string; transactions: number };
+export type Account = { id: number; name: string; kind: string; purpose: string; transactions: number };
 export type Doc = { id: number; filename: string; imported_at: string; transactions: number; account: string | null; kind: string | null; from: string | null; to: string | null; warnings: string[] };
 export type FileResult = { filename: string; transactions?: number; duplicate?: boolean; needs_password?: boolean; error?: string; message?: string; account?: string; kind?: string; period?: string; warnings?: string[]; document_id?: number; account_id?: number };
 export type Year = { financial_year: string; transactions: number };

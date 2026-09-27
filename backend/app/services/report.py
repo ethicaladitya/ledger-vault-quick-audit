@@ -25,12 +25,14 @@ def inr(v: Decimal) -> str:
     return ("-" if v < 0 else "") + "₹" + ",".join(groups + [tail]) if groups else ("-" if v < 0 else "") + "₹" + tail
 
 
-def fy_transactions(db: Session, workspace_id: int, fy: str | None, account_id: int | None = None):
+def fy_transactions(db: Session, workspace_id: int, fy: str | None, account_id: int | None = None, purpose: str | None = None):
     q = db.query(Transaction, FinancialAccount).join(FinancialAccount, Transaction.account_id == FinancialAccount.id).filter(FinancialAccount.workspace_id == workspace_id)
     if fy:
         q = q.filter(Transaction.financial_year == fy)
     if account_id:
         q = q.filter(Transaction.account_id == account_id)
+    if purpose:
+        q = q.filter(Transaction.purpose == purpose)
     return q.order_by(Transaction.txn_date, Transaction.id).all()
 
 
@@ -46,6 +48,34 @@ def totals(rows) -> dict:
             inflow += t.credit
             outflow += t.debit
     return {"inflow": inflow, "outflow": outflow - refunds, "refunds": refunds, "neutral": neutral}
+
+
+def purpose_split(rows) -> dict:
+    """Money in/out and counts by business / personal / unknown (neutral flows excluded)."""
+    out = {}
+    for p in ("business", "personal", "unknown"):
+        sel = [(t, a) for t, a in rows if t.purpose == p]
+        tot = totals(sel)
+        out[p] = {"count": len(sel), "inflow": str(tot["inflow"]), "outflow": str(tot["outflow"])}
+    return out
+
+
+def purpose_flags(rows, purpose: str | None) -> list[dict]:
+    """In a business/personal report, say what was left out so nothing silently disappears."""
+    if not purpose:
+        return []
+    unknown = [t for t, _ in rows if t.purpose == "unknown"]
+    other = "personal" if purpose == "business" else "business"
+    excluded = [t for t, _ in rows if t.purpose == other]
+    out = []
+    if unknown:
+        out.append({"level": "warning", "title": f"{len(unknown)} transaction(s) have no business/personal purpose yet",
+                    "detail": f"{inr(sum(t.debit + t.credit for t in unknown))} is left out of this {purpose} report until you choose. "
+                              "Open Transactions → Purpose: Unknown, or set what each account is used for in Settings."})
+    if excluded:
+        out.append({"level": "info", "title": f"{len(excluded)} {other} transaction(s) excluded",
+                    "detail": f"{inr(sum(t.debit for t in excluded))} out and {inr(sum(t.credit for t in excluded))} in are marked {other} and not part of this report."})
+    return out
 
 
 def account_summary(rows) -> list[dict]:
@@ -158,10 +188,12 @@ def flags(rows, fy: str | None) -> list[dict]:
     return out
 
 
-def export_xlsx(db: Session, workspace_id: int, fy: str | None, account_id: int | None = None) -> bytes:
+def export_xlsx(db: Session, workspace_id: int, fy: str | None, account_id: int | None = None, purpose: str | None = None,
+                business_mode: bool = False) -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
-    rows = fy_transactions(db, workspace_id, fy, account_id)
+    all_rows = fy_transactions(db, workspace_id, fy, account_id)
+    rows = [(t, a) for t, a in all_rows if t.purpose == purpose] if purpose else all_rows
     docs = {d.id: d.filename for d in db.query(SourceDocument).filter_by(workspace_id=workspace_id)}
     wb = Workbook()
     bold = Font(bold=True)
@@ -170,10 +202,15 @@ def export_xlsx(db: Session, workspace_id: int, fy: str | None, account_id: int 
     ws = wb.active
     ws.title = "Summary"
     tot = totals(rows)
-    scope = f" — {rows[0][1].name}" if account_id and rows else ""
-    ws.append([f"LedgerVault working paper — FY {fy or 'all years'}{scope}"])
+    scope = f" — {all_rows[0][1].name}" if account_id and all_rows else ""
+    kind = f"{purpose.capitalize()} working paper" if purpose else "working paper"
+    ws.append([f"LedgerVault {kind} — FY {fy or 'all years'}{scope}"])
     ws["A1"].font = Font(bold=True, size=14)
     ws.append(["Provisional. Prepared from bank/card statements for review by a Chartered Accountant; not a tax computation."])
+    if purpose:
+        split = purpose_split(all_rows)
+        ws.append([f"Only transactions marked {purpose}. Excluded: {split['personal' if purpose == 'business' else 'business']['count']} "
+                   f"{'personal' if purpose == 'business' else 'business'} and {split['unknown']['count']} with no purpose yet."])
     ws.append([])
     for label, key in [("Money in (excl. transfers & refunds)", "inflow"), ("Money out (net of refunds, excl. card bill payments & transfers)", "outflow"), ("Refunds / reversals", "refunds"), ("Neutral: card bill payments & self transfers", "neutral")]:
         ws.append([label, float(tot[key])])
@@ -214,19 +251,22 @@ def export_xlsx(db: Session, workspace_id: int, fy: str | None, account_id: int 
     fl.append(["Level", "Flag", "Detail"])
     for c in fl[1]:
         c.font, c.fill = bold, head_fill
-    for f in flags(rows, fy):
+    for f in purpose_flags(all_rows, purpose) + flags(rows, fy):
         fl.append([f["level"], f["title"], f["detail"]])
     for col, width in zip("ABC", [10, 60, 120]):
         fl.column_dimensions[col].width = width
 
     tx = wb.create_sheet("Transactions")
-    tx.append(["FY", "Date", "Account", "Type", "Narration", "Debit (₹)", "Credit (₹)", "Balance (₹)", "Category", "Group", "Status", "Note", "Source file", "Source row"])
+    show_purpose = business_mode or bool(purpose)
+    tx.append(["FY", "Date", "Account", "Type", "Narration", "Debit (₹)", "Credit (₹)", "Balance (₹)", "Category", "Group", "Status", "Note", "Source file", "Source row"]
+              + (["Purpose"] if show_purpose else []))
     for c in tx[1]:
         c.font, c.fill = bold, head_fill
     for t, a in rows:
         label, group, _ = CATEGORIES.get(t.category, (t.category, "review", ""))
         tx.append([t.financial_year, t.txn_date, a.name, a.kind, t.narration, float(t.debit), float(t.credit),
-                   float(t.balance) if t.balance is not None else None, label, group.replace("_", " "), t.status.replace("_", " "), t.note or "", docs.get(t.document_id, ""), t.source_row])
+                   float(t.balance) if t.balance is not None else None, label, group.replace("_", " "), t.status.replace("_", " "), t.note or "", docs.get(t.document_id, ""), t.source_row]
+                  + ([t.purpose] if show_purpose else []))
     for col, width in zip("ABCDEFGHIJKLMN", [9, 12, 22, 7, 60, 13, 13, 13, 30, 14, 20, 30, 30, 9]):
         tx.column_dimensions[col].width = width
     tx.freeze_panes = "A2"

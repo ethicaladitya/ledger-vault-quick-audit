@@ -116,7 +116,7 @@ def test_dividends_and_learning_from_corrections(client):
     assert by["ACH C- HCL 2ND INTDIV25 26-601092"]["category"] == "dividend"
     first = by["NEFT CR-GOATLIFE FARMS"]
     r = client.patch(f"/transactions/{first['id']}", headers=h, json={"category": "business_receipt"}).json()
-    assert r["similar"] == {"key": "goatlife farms", "count": 1}  # the debit-side POS row is not "similar"
+    assert r["similar"] == {"key": "goatlife farms", "count": 1, "field": "category", "value": "business_receipt"}  # debit-side POS row isn't "similar"
     r = client.patch(f"/transactions/{first['id']}", headers=h, json={"category": "business_receipt", "apply_similar": True}).json()
     assert r["applied"] == 1
     # Remembered for the next upload.
@@ -184,3 +184,85 @@ def test_report_per_account(client):
     assert load_workbook(io.BytesIO(x.content))["Transactions"].max_row == 3  # header + 2 card rows
     other = signup(client, "other2@example.com")
     assert client.get(f"/report?account_id={card_id}", headers=other).json()["totals"]["outflow"] == "0"
+
+
+def test_same_statement_in_another_format_is_not_double_counted(client):
+    from openpyxl import Workbook
+    h = signup(client)
+    csv = "date,narration,debit,credit\n2025-04-01,SALARY APR ACME,,85000\n2025-04-03,UPI-SWIGGY-swiggy@icici,450,\n2025-04-08,ATM CASH WDL,5000,\n2025-04-09,NEW ROW ONLY IN XLSX,,0\n"
+    upload(client, h, [("statement.csv", csv)], "")  # auto-named from the file: "statement"
+    wb = Workbook(); ws = wb.active
+    ws.append(["HDFC BANK Ltd. Statement of account"]); ws.append([])
+    ws.append(["Date", "Narration", "Withdrawal Amt.", "Deposit Amt.", "Closing Balance"])
+    ws.append(["01/04/25", "SALARY APR ACME PVT LTD", None, 85000, 185000])   # narration differs slightly
+    ws.append(["03/04/25", "UPI-SWIGGY-swiggy@icici-SWIGGY", 450, None, 184550])
+    ws.append(["08/04/25", "ATM CASH WDL", 5000, None, 179550])
+    ws.append(["10/04/25", "LIC OF INDIA PREMIUM", 2000, None, 177550])      # genuinely new
+    buf = io.BytesIO(); wb.save(buf)
+    res = upload(client, h, [("HDFC_Apr.xlsx", buf.getvalue())], "")["files"][0]
+    assert res["account"] == "statement" and res["transactions"] == 1
+    assert any("already imported" in w for w in res["warnings"])
+    assert client.get("/transactions", headers=h).json()["total"] == 4
+    assert len(client.get("/accounts", headers=h).json()) == 1
+    # Same file name, different month: not a duplicate.
+    may = csv.replace("2025-04", "2025-05")
+    assert upload(client, h, [("statement.csv", may)], "")["files"][0]["transactions"] == 3
+
+
+MIXED = """date,narration,debit,credit
+2025-04-02,AMAZON WEB SERVICES AWS,4200,
+2025-04-03,SWIGGY BANGALORE,600,
+2025-04-04,RAZORPAY SETTLEMENT CLIENT ABC,,50000
+2025-04-05,INDIAN OIL PETROL PUMP,2000,
+2025-04-06,CREDIT CARD PAYMENT,10000,
+2025-04-07,UPI-RAHUL-rahul@okaxis,1500,
+2025-04-08,UPI-RAHUL-rahul@okaxis,700,
+"""
+
+
+def test_business_personal_split_and_report(client):
+    from openpyxl import load_workbook
+    h = signup(client)
+    assert client.get("/settings", headers=h).json() == {"business_mode": False}
+    assert client.patch("/settings", headers=h, json={"business_mode": True}).json()["business_mode"] is True
+    upload(client, h, [("mixed.csv", MIXED)], "HDFC Savings")
+    by = {t["narration"]: t for t in client.get("/transactions", headers=h).json()["items"]}
+    assert by["AMAZON WEB SERVICES AWS"]["category"] == "software" and by["AMAZON WEB SERVICES AWS"]["purpose"] == "business"
+    assert by["RAZORPAY SETTLEMENT CLIENT ABC"]["purpose"] == "business"
+    assert by["SWIGGY BANGALORE"]["purpose"] == "personal"
+    assert by["INDIAN OIL PETROL PUMP"]["purpose"] == "unknown"        # ambiguous: left for the user
+    assert by["CREDIT CARD PAYMENT"]["purpose"] == "neutral"
+
+    # Teach one UPI payee as business, applied to the similar row too.
+    rahul = by["UPI-RAHUL-rahul@okaxis"]
+    r = client.patch(f"/transactions/{rahul['id']}", headers=h, json={"purpose": "business"}).json()
+    assert r["similar"]["field"] == "purpose" and r["similar"]["count"] == 1
+    r = client.patch(f"/transactions/{rahul['id']}", headers=h, json={"purpose": "business", "apply_similar": True}).json()
+    assert r["applied"] == 1
+
+    rep = client.get("/report?purpose=business", headers=h).json()
+    assert rep["totals"]["outflow"] == "6400.00" and rep["totals"]["inflow"] == "50000.00"   # AWS 4200 + Rahul 2200
+    assert any("no business/personal purpose" in f["title"] for f in rep["flags"])          # petrol left out, and said so
+    assert rep["purpose_split"]["unknown"]["count"] == 1
+    assert client.get("/transactions?purpose=unknown", headers=h).json()["total"] == 1
+
+    # A business account makes everything business except clearly personal items.
+    acc = client.get("/accounts", headers=h).json()[0]
+    assert acc["purpose"] == "mixed"
+    client.patch(f"/accounts/{acc['id']}", headers=h, json={"purpose": "business"})
+    by = {t["narration"]: t for t in client.get("/transactions", headers=h).json()["items"]}
+    assert by["INDIAN OIL PETROL PUMP"]["purpose"] == "business" and by["SWIGGY BANGALORE"]["purpose"] == "business"
+    client.patch(f"/accounts/{acc['id']}", headers=h, json={"purpose": "personal"})
+    by = {t["narration"]: t for t in client.get("/transactions", headers=h).json()["items"]}
+    assert by["AMAZON WEB SERVICES AWS"]["purpose"] == "business"     # business by nature, even on a personal account
+    assert by["SWIGGY BANGALORE"]["purpose"] == "personal"
+    assert by["UPI-RAHUL-rahul@okaxis"]["purpose"] == "business"      # the user's choice survives
+
+    x = client.get("/export.xlsx?purpose=business", headers=h)
+    assert "business-working-paper" in x.headers["content-disposition"]
+    wb = load_workbook(io.BytesIO(x.content))
+    assert wb["Summary"]["A1"].value.startswith("LedgerVault Business working paper")
+    tx = wb["Transactions"]
+    assert tx.cell(row=1, column=15).value == "Purpose" and {tx.cell(row=r, column=15).value for r in range(2, tx.max_row + 1)} == {"business"}
+    # A card bill payment has no purpose to set.
+    assert client.patch(f"/transactions/{by['CREDIT CARD PAYMENT']['id']}", headers=h, json={"purpose": "business"}).status_code == 400

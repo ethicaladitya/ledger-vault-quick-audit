@@ -289,7 +289,29 @@ def parse_statement(filename: str, data: bytes, kind: str, hints: Hints | None =
 # ---------- persistence ----------
 
 def _dedupe_key(account_id: int, d: date, narration: str, debit: Decimal, credit: Decimal):
-    return (account_id, d, re.sub(r"\W+", "", narration.lower())[:80], Decimal(debit).quantize(Decimal("0.01")), Decimal(credit).quantize(Decimal("0.01")))
+    # Only the start of the narration: PDF and Excel versions of one statement wrap and truncate it differently.
+    return (account_id, d, re.sub(r"[^a-z0-9]+", "", narration.lower())[:10], Decimal(debit).quantize(Decimal("0.01")), Decimal(credit).quantize(Decimal("0.01")))
+
+
+def find_same_statement(db: Session, workspace_id: int, rows: list[dict]) -> FinancialAccount | None:
+    """An existing account that already holds most of these rows (same statement in another format or re-download)."""
+    if len(rows) < 3:
+        return None
+    wanted = Counter((r["date"], Decimal(r["debit"]).quantize(Decimal("0.01")), Decimal(r["credit"]).quantize(Decimal("0.01"))) for r in rows)
+    lo, hi = min(r["date"] for r in rows), max(r["date"] for r in rows)
+    existing = (db.query(Transaction).join(FinancialAccount)
+                .filter(FinancialAccount.workspace_id == workspace_id, Transaction.txn_date >= lo, Transaction.txn_date <= hi).all())
+    per_account: dict[int, Counter] = {}
+    for t in existing:
+        per_account.setdefault(t.account_id, Counter())[(t.txn_date, Decimal(t.debit).quantize(Decimal("0.01")), Decimal(t.credit).quantize(Decimal("0.01")))] += 1
+    best, best_score = None, 0.0
+    for acc_id, have in per_account.items():
+        overlap = sum((wanted & have).values())
+        # Relative to the smaller side, so a statement that contains (or is contained by) an earlier one matches.
+        score = overlap / min(len(rows), sum(have.values()))
+        if overlap >= 3 and score > best_score:
+            best, best_score = acc_id, score
+    return db.get(FinancialAccount, best) if best is not None and best_score >= 0.8 else None
 
 
 def get_account(db: Session, workspace_id: int, name: str, kind: str) -> FinancialAccount:
@@ -349,7 +371,14 @@ def import_file(db: Session, filename: str, data: bytes, account_name: str, kind
         return [{"filename": filename, "error": "The file could not be read. Is it a valid PDF, CSV, XLS or XLSX statement?"}]
     if not rows:
         return [{"filename": filename, "error": "No transactions found in the file.", "warnings": warnings}]
-    account = known or get_account(db, workspace_id, name, effective_kind)
+    same = find_same_statement(db, workspace_id, rows)
+    if same and (not known or same.id != known.id):
+        # Same transactions already live in another account: merge instead of counting them twice.
+        warnings.append(f"This looks like a statement already imported into “{same.name}” (another format or a re-download), "
+                        f"so it was merged there instead of creating “{name}”. Only rows not already present were added.")
+        account = same
+    else:
+        account = known or get_account(db, workspace_id, name, effective_kind)
 
     # Overlapping statement periods: skip rows already imported for this account from another file.
     seen = Counter(_dedupe_key(t.account_id, t.txn_date, t.narration, t.debit, t.credit)
