@@ -56,7 +56,7 @@ REVIEW = {c for c, (_, group, _) in CATEGORIES.items() if group == "review"}
 
 D, C, A = "debit", "credit", "any"
 # Bump when rules change: rows categorised by rules (not by the user) are re-classified on start-up.
-RULES_VERSION = 5
+RULES_VERSION = 6
 
 # Narration codes: HDFC ATW (own ATM) / NWD, EAW (other ATM), ICICI VPS/IPS (debit card), BIL (bill pay),
 # INF (linked-account transfer), MMT (IMPS), EBA (ICICI Direct), NFS (shared ATM network), ICCW (UPI cash
@@ -129,21 +129,44 @@ CARD_EMI = re.compile(r"\bemi\b|smart ?emi|emi ?conv|flexi ?pay|easy ?emi|instal
 EMI_COSTS = re.compile(r"fee|charge|interest|\bint\b|gst|tax on|foreclos", re.I)
 
 
+# Which direction each category can take. A payee rule learned from a purchase must not make a refund from
+# the same payee "income", and a salary rule must not turn a debit into salary.
+CREDIT_ONLY_GROUPS = {"income", "adjustment"}
+DEBIT_ONLY_GROUPS = {"expense", "deduction_hint", "tax"}
+CREDIT_ONLY = {"investment_redemption", "cash_deposit"}
+DEBIT_ONLY = {"investment"}
+# The only things a credit on a credit card can be: the bank's bill payment arriving, a merchant refund /
+# reversal / cashback, or an EMI conversion. Never income.
+CARD_CREDIT_CATEGORIES = {"card_settlement", "refund_reversal", "card_emi"}
+
+
+def category_fits(category: str, is_debit: bool, account_kind: str = "bank") -> bool:
+    group = CATEGORIES.get(category, ("", "review", ""))[1]
+    if account_kind == "card" and not is_debit:
+        return category in CARD_CREDIT_CATEGORIES
+    if account_kind == "card" and category == "card_settlement":
+        return False  # a card debit is never the card's own bill payment (a misread sign or a glued line)
+    if is_debit:
+        return group not in CREDIT_ONLY_GROUPS and category not in CREDIT_ONLY
+    return group not in DEBIT_ONLY_GROUPS and category not in DEBIT_ONLY
+
+
 def classify(narration: str, is_debit: bool = True, account_kind: str = "bank", user_rules: dict[str, str] | None = None) -> str:
     if user_rules:
         learned = user_rules.get(merchant_key(narration))
-        if learned:
+        if learned and category_fits(learned, is_debit, account_kind):
             return learned
     # On a credit card, "EMI ..." rows convert an existing purchase into instalments (credit) or repay it
     # (debit). The purchase itself is already counted, so these are neutral; EMI interest/fees are charges.
     if account_kind == "card" and CARD_EMI.search(narration):
         return "bank_charges" if EMI_COSTS.search(narration) else "card_emi"
-    # On a card statement, a credit that looks like a payment is the other leg of the bank's bill payment.
     if account_kind == "card" and not is_debit:
+        # A payment-like credit is the other leg of the bank's bill payment; anything else is a merchant credit.
         if _CARD_PAYMENT_CREDIT.search(narration) and not re.search(r"refund|reversal|cashback", narration, re.I):
             return "card_settlement"
+        return "refund_reversal"
     side = D if is_debit else C
     for pattern, category, rule_side in _COMPILED:
-        if rule_side in (A, side) and pattern.search(narration):
+        if rule_side in (A, side) and pattern.search(narration) and category_fits(category, is_debit, account_kind):
             return category
     return "uncategorized"

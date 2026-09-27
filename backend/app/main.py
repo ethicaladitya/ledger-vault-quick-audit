@@ -12,7 +12,7 @@ from .security import hash_password, verify_password, token_for, current_user, c
 from .services.ingestion import import_file, import_path, MAX_FILE
 from .services.passwords import Hints
 from .services.reconciliation import reconcile, base_status
-from .services.report import fy_transactions, totals, category_summary, account_summary, flags, export_xlsx, purpose_flags, purpose_split, card_reconciliation
+from .services.report import fy_transactions, totals, category_summary, account_summary, flags, export_xlsx, purpose_flags, purpose_split, card_reconciliation, books
 from .services.rules import CATEGORIES, MATCHED, NEUTRAL, merchant_key, classify
 from . import migrate
 
@@ -477,6 +477,13 @@ def report(fy: str | None = None, account_id: int | None = None, purpose: str | 
             "flags": purpose_flags(all_rows, purpose) + flags(rows, fy),
             "accounts": account_summary(fy_transactions(db, user.workspace_id, fy, None, purpose)),
             "purpose_split": purpose_split(all_rows), "cards": card_reconciliation(rows)}
+
+
+@app.get("/books")
+def books_ledger(fy: str | None = None, account_id: int | None = None, purpose: str | None = Query(default=None, pattern="^(business|personal)$"),
+                 db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Every bank and card transaction once, in date order, without the two legs of card bill payments or self-transfers."""
+    return books(fy_transactions(db, user.workspace_id, fy, account_id, purpose))
 
 
 @app.get("/export.xlsx")

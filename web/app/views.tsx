@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { money, amountOf, STATUS_LABEL, type Api, type Dash, type Tx, type Category, type Account, type Doc, type FileResult, type Flag } from "./lib";
+import { money, amountOf, STATUS_LABEL, type Api, type Dash, type Tx, type Category, type Account, type Doc, type FileResult, type Flag, type Books } from "./lib";
 import type { ViewId } from "./page";
 
 type ViewProps = { api: Api; fy: string; version: number; refresh: () => void; go: (v: ViewId, filter?: string) => void; businessMode: boolean };
@@ -770,6 +770,98 @@ export function Settings({ api, version, refresh, go, businessMode, onBusinessMo
             <button className="secondary" onClick={() => go("report")}>Open the business report →</button>
           </div>
         </section>
+      )}
+    </>
+  );
+}
+
+// ---------------- Books ----------------
+
+export function BooksView({ api, fy, version, go, businessMode }: ViewProps) {
+  const [data, setData] = useState<Books>();
+  const [error, setError] = useState("");
+  const [account, setAccount] = useState("");
+  const [search, setSearch] = useState("");
+  const [scope, setScope] = useState<"" | "business" | "personal">("");
+  useEffect(() => { if (!businessMode) setScope(""); }, [businessMode]);
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (fy) params.set("fy", fy);
+    if (scope) params.set("purpose", scope);
+    api.get<Books>(`/books?${params}`).then(setData).catch(e => setError(e.message));
+  }, [api, fy, version, scope]);
+  const accounts = [...new Set(data?.entries.map(e => e.account) ?? [])].sort();
+  const needle = search.trim().toLowerCase();
+  const shown = (data?.entries ?? []).filter(e => (!account || e.account === account)
+    && (!needle || e.narration.toLowerCase().includes(needle) || e.category_label.toLowerCase().includes(needle) || (e.note ?? "").toLowerCase().includes(needle)));
+  const filtered = shown.length !== (data?.entries.length ?? 0);
+  return (
+    <>
+      <header>
+        <div><p className="eyebrow">Bank + credit cards {fy && `· FY ${fy}`}</p><h1>Books</h1></div>
+        <div className="actions tight">
+          {businessMode && (
+            <select value={scope} onChange={e => setScope(e.target.value as "" | "business" | "personal")} aria-label="Business or personal">
+              <option value="">Business & personal</option><option value="business">Business only</option><option value="personal">Personal only</option>
+            </select>
+          )}
+          <select value={account} onChange={e => setAccount(e.target.value)} aria-label="Account">
+            <option value="">All accounts</option>
+            {accounts.map(a => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <input type="search" placeholder="Search narration, category, note" value={search} onChange={e => setSearch(e.target.value)} />
+        </div>
+      </header>
+      {error && <p className="error">{error}</p>}
+      <p className="explain">Every purchase, receipt and refund from all your bank accounts and credit cards, once, in date order. Paying a card bill moves money
+        from the bank to the card, so both sides of it are left out: the card purchases it paid for are already listed. Transfers between your own
+        accounts and card EMI conversions are left out for the same reason. The totals at the bottom show exactly what was left out.</p>
+      {data && (
+        <>
+          {data.gaps.length > 0 && (
+            <ul className="flags"><li className="warning">
+              <b>{money(data.gap_total)} of card spending is missing from these books</b>
+              <p>Your bank paid bills for {data.gaps.length === 1 ? "a card" : `${data.gaps.length} cards`} whose statements aren't uploaded (or not for those months), so those purchases can't be listed yet: {data.gaps.map(g => `${g.card} (${g.months.join(", ")})`).join("; ")}. <button className="link inline" onClick={() => go("upload")}>Upload them</button></p>
+            </li></ul>
+          )}
+          <div className="metrics">
+            <article><p>Money out</p><strong>{money(data.totals.money_out)}</strong><small>{data.totals.count} transactions</small></article>
+            <article><p>Refunds</p><strong>{money(data.totals.refunds)}</strong><small>Net spend {money(data.totals.net_spend)}</small></article>
+            <article><p>Money in</p><strong>{money(data.totals.money_in)}</strong><small>Excludes refunds</small></article>
+            <article><p>Net</p><strong>{money(data.totals.net)}</strong><small>In − out, refunds included</small></article>
+          </div>
+          <section className="panel">
+            <div className="panelhead"><h2>Ledger</h2><span>{filtered ? `${shown.length} of ${data.entries.length} shown · running net is for all accounts` : `${data.entries.length} transactions`}</span></div>
+            <div className="scroll"><table>
+              <thead><tr><th>Date</th><th>Account</th><th>Narration</th><th>Category</th><th className="num">Out</th><th className="num">In</th><th className="num">Running net</th><th>Status</th></tr></thead>
+              <tbody>{shown.map(e => (
+                <tr key={e.id}>
+                  <td className="nowrap">{e.date}</td>
+                  <td><span className="nowrap">{e.account}</span><small className="muted block">{e.account_kind === "card" ? "Credit card" : "Bank"}</small></td>
+                  <td>{e.narration}{e.note && <small className="muted block">{e.note}</small>}</td>
+                  <td>{e.category_label}{e.refund && <small className="muted block">refund</small>}</td>
+                  <td className="num nowrap">{Number(e.out) ? money(e.out) : ""}</td>
+                  <td className="num nowrap">{Number(e.in) ? money(e.in) : ""}</td>
+                  <td className="num nowrap">{money(e.running)}</td>
+                  <td>{e.status === "ok" ? "" : <StatusTag status={e.status} />}</td>
+                </tr>
+              ))}</tbody>
+            </table></div>
+          </section>
+          {data.excluded.length > 0 && (
+            <section className="panel">
+              <div className="panelhead"><h2>Left out of the books</h2><span>Money moving between your own accounts</span></div>
+              <div className="scroll"><table>
+                <thead><tr><th>What</th><th className="num">Count</th><th className="num">Matched to the other side</th><th className="num">Out</th><th className="num">In</th></tr></thead>
+                <tbody>{data.excluded.map(e => (
+                  <tr key={e.label}><td><b>{e.label}</b></td><td className="num">{e.count}</td><td className="num">{e.matched} of {e.count}</td>
+                    <td className="num nowrap">{Number(e.debit) ? money(e.debit) : "—"}</td><td className="num nowrap">{Number(e.credit) ? money(e.credit) : "—"}</td></tr>
+                ))}</tbody>
+              </table></div>
+              <p className="muted small-note">Anything not matched to its other side is explained on the <button className="link inline" onClick={() => go("reconciliation")}>Reconciliation</button> page.</p>
+            </section>
+          )}
+        </>
       )}
     </>
   );

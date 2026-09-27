@@ -178,7 +178,7 @@ def test_report_per_account(client):
     one = client.get(f"/report?account_id={card_id}", headers=h).json()
     assert one["totals"]["outflow"] == "1200.00" and {c["category"] for c in one["categories"]} == {"dining", "card_settlement"}
     wb = load_workbook(io.BytesIO(client.get("/export.xlsx", headers=h).content))
-    assert wb.sheetnames == ["Summary", "By account", "Credit cards", "Flags", "Transactions"]
+    assert wb.sheetnames == ["Summary", "Books", "By account", "Credit cards", "Flags", "Transactions"]
     x = client.get(f"/export.xlsx?account_id={card_id}", headers=h)
     assert "HDFC-Regalia" in x.headers["content-disposition"]
     assert load_workbook(io.BytesIO(x.content))["Transactions"].max_row == 3  # header + 2 card rows

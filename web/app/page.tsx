@@ -1,13 +1,14 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { makeApi, type Year } from "./lib";
-import { Overview, Upload, Transactions, Reconciliation, Report, Settings } from "./views";
+import { Overview, Upload, Transactions, BooksView, Reconciliation, Report, Settings } from "./views";
 
 const TOKEN_KEY = "ledger_token";
 const VIEWS = [
   { id: "overview", label: "Overview" },
   { id: "upload", label: "Upload & statements" },
   { id: "transactions", label: "Transactions" },
+  { id: "books", label: "Books" },
   { id: "reconciliation", label: "Reconciliation" },
   { id: "report", label: "Report & export" },
   { id: "settings", label: "Settings" },
@@ -116,6 +117,7 @@ function Workspace({ token, onLogout }: { token: string; onLogout: () => void })
         {view === "overview" && <Overview {...props} />}
         {view === "upload" && <Upload {...props} />}
         {view === "transactions" && <Transactions {...props} initialStatus={txFilter} />}
+        {view === "books" && <BooksView {...props} />}
         {view === "reconciliation" && <Reconciliation {...props} />}
         {view === "report" && <Report {...props} />}
         {view === "settings" && <Settings {...props} onBusinessMode={setBusinessMode} />}

@@ -52,3 +52,14 @@ export function makeApi(token: string, onUnauthorized: () => void) {
   };
 }
 export type Api = ReturnType<typeof makeApi>;
+export type BookEntry = {
+  id: number; date: string; account: string; account_kind: string; narration: string; category: string; category_label: string; group: string;
+  out: string; in: string; refund: boolean; running: string; status: string; note: string | null; purpose: string;
+};
+export type CardGap = { card: string; status: string; count: number; amount: string; months: string[]; message: string };
+export type Books = {
+  entries: BookEntry[];
+  totals: { money_in: string; money_out: string; refunds: string; net_spend: string; net: string; count: number };
+  excluded: { label: string; count: number; matched: number; debit: string; credit: string }[];
+  gaps: CardGap[]; gap_total: string;
+};

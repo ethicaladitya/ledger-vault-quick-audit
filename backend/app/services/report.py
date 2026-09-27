@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 from sqlalchemy.orm import Session
 from ..models import Transaction, FinancialAccount, SourceDocument
-from .rules import CATEGORIES, NEUTRAL, REVIEW
+from .rules import CATEGORIES, NEUTRAL, REVIEW, category_fits
 
 LAKH = Decimal("100000")
 MONTHS = ["Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"]
@@ -36,17 +36,23 @@ def fy_transactions(db: Session, workspace_id: int, fy: str | None, account_id: 
     return q.order_by(Transaction.txn_date, Transaction.id).all()
 
 
+def is_refund(t, a) -> bool:
+    """A credit that gives back spending rather than bringing in money: any non-neutral credit on a card, a
+    refund/reversal, or a credit in a spending category (e.g. a merchant credit filed under Dining)."""
+    return t.category == "refund_reversal" or a.kind == "card" or not category_fits(t.category, False)
+
+
 def totals(rows) -> dict:
     inflow = outflow = refunds = neutral = Decimal()
-    for t, _ in rows:
+    for t, a in rows:
         if t.category in NEUTRAL:
             neutral += t.debit
-        elif t.category == "refund_reversal":
+            continue
+        outflow += t.debit
+        if is_refund(t, a):
             refunds += t.credit
-            outflow += t.debit
         else:
             inflow += t.credit
-            outflow += t.debit
     card = sum((t.debit for t, _ in rows if t.category == "card_settlement"), Decimal())
     return {"inflow": inflow, "outflow": outflow - refunds, "refunds": refunds, "neutral": neutral,
             "card_payments": card, "self_transfers": sum((t.debit for t, _ in rows if t.category == "own_transfer"), Decimal()),
@@ -195,6 +201,54 @@ def card_reconciliation(rows) -> dict:
         "cash_paid": str(cash_total),
         "sft_reportable": total_paid >= 10 * LAKH or cash_total >= LAKH,
     }
+
+
+EXCLUDED_LABELS = {
+    ("card_settlement", "bank"): "Credit card bills paid from the bank",
+    ("card_settlement", "card"): "Bill payments received on the cards",
+    ("own_transfer", "bank"): "Transfers between your own accounts",
+    ("own_transfer", "card"): "Transfers between your own accounts",
+    ("card_emi", "card"): "Card EMI conversions and instalments",
+    ("card_emi", "bank"): "Card EMI conversions and instalments",
+}
+
+
+def books(rows) -> dict:
+    """One date-ordered ledger across every bank account and credit card: each purchase, receipt and refund once.
+
+    Both legs of a card bill payment (the bank debit and the payment credit on the card) are left out, since the
+    card purchases themselves are in the ledger; so are self-transfers and card EMI conversions. What was left out
+    is totalled in `excluded`, so the ledger can be checked against the statements. Bill payments to cards whose
+    statement isn't uploaded are listed under `gaps`: those purchases are missing from the ledger until it is.
+    """
+    entries, excluded = [], {}
+    money_in = money_out = refunds = running = Decimal()
+    for t, a in rows:
+        if t.category in NEUTRAL:
+            label = EXCLUDED_LABELS.get((t.category, a.kind), CATEGORIES[t.category][0])
+            e = excluded.setdefault(label, {"label": label, "count": 0, "debit": Decimal(), "credit": Decimal(), "matched": 0})
+            e["count"] += 1
+            e["debit"] += t.debit
+            e["credit"] += t.credit
+            e["matched"] += bool(t.match_group)
+            continue
+        refund = t.credit > 0 and is_refund(t, a)
+        money_out += t.debit
+        if refund:
+            refunds += t.credit
+        else:
+            money_in += t.credit
+        running += t.credit - t.debit
+        label, group, _ = CATEGORIES.get(t.category, (t.category, "review", ""))
+        entries.append({"id": t.id, "date": t.txn_date.isoformat(), "account": a.name, "account_kind": a.kind, "narration": t.narration,
+                        "category": t.category, "category_label": label, "group": group, "out": str(t.debit), "in": str(t.credit),
+                        "refund": refund, "running": str(running), "status": t.status, "note": t.note, "purpose": t.purpose})
+    gaps = missing_card_statements(rows)
+    return {"entries": entries,
+            "totals": {"money_in": str(money_in), "money_out": str(money_out), "refunds": str(refunds),
+                       "net_spend": str(money_out - refunds), "net": str(running), "count": len(entries)},
+            "excluded": [{**e, "debit": str(e["debit"]), "credit": str(e["credit"])} for e in excluded.values()],
+            "gaps": gaps, "gap_total": str(sum((Decimal(g["amount"]) for g in gaps), Decimal()))}
 
 
 def purpose_split(rows) -> dict:
@@ -375,6 +429,40 @@ def export_xlsx(db: Session, workspace_id: int, fy: str | None, account_id: int 
     ws.append(["Credit card bill payments and transfers between own accounts are not income or expenses; see the lines above and the 'Credit cards' sheet."])
     for col, width in zip("ABCDEF", [48, 16, 8, 16, 16, 80]):
         ws.column_dimensions[col].width = width
+
+    bk = books(rows)
+    bs = wb.create_sheet("Books")
+    bs.append(["Books — every bank and credit card transaction once, in date order"])
+    bs["A1"].font = Font(bold=True, size=13)
+    bs.append(["Credit card bill payments (the bank debit and the card's payment credit), transfers between own accounts and card EMI "
+               "conversions are left out: the card purchases themselves are listed. What was left out is totalled at the bottom."])
+    bs.append([])
+    bs.append(["Date", "Account", "Type", "Narration", "Category", "Money out (₹)", "Money in (₹)", "Refund?", "Running net (₹)", "Status", "Note"])
+    for c in bs[bs.max_row]:
+        c.font, c.fill = bold, head_fill
+    for e in bk["entries"]:
+        bs.append([date.fromisoformat(e["date"]), e["account"], "Card" if e["account_kind"] == "card" else "Bank", e["narration"], e["category_label"],
+                   float(e["out"]) or None, float(e["in"]) or None, "refund" if e["refund"] else "", float(e["running"]),
+                   e["status"].replace("_", " "), e["note"] or ""])
+    bs.append([])
+    for label, key in [("Money out", "money_out"), ("Money in (excl. refunds)", "money_in"), ("Refunds / reversals", "refunds"),
+                       ("Net spend (money out − refunds)", "net_spend"), ("Net (in − out)", "net")]:
+        bs.append([label, None, None, None, None, float(bk["totals"][key])])
+        bs[bs.max_row][0].font = bold
+    bs.append([])
+    bs.append(["Left out of the books", None, None, "Count", "Matched to the other leg", "Debits (₹)", "Credits (₹)"])
+    for c in bs[bs.max_row]:
+        c.font, c.fill = bold, head_fill
+    for e in bk["excluded"]:
+        bs.append([e["label"], None, None, e["count"], e["matched"], float(e["debit"]), float(e["credit"])])
+    if bk["gaps"]:
+        bs.append([])
+        bs.append([f"Not in the books yet: {inr(Decimal(bk['gap_total']))} of card bills paid to cards whose statements aren't uploaded "
+                   "(their purchases are missing). See the 'Credit cards' sheet."])
+        bs[bs.max_row][0].font = Font(bold=True, color="B00020")
+    bs.freeze_panes = "A5"
+    for col, width in zip("ABCDEFGHIJK", [12, 26, 7, 60, 28, 15, 15, 9, 16, 16, 30]):
+        bs.column_dimensions[col].width = width
 
     if not account_id:
         ba = wb.create_sheet("By account")
