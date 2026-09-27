@@ -162,3 +162,25 @@ def test_review_and_confirm_after_upload(client):
     other = signup(client, "other@example.com")
     assert client.get(f"/imports/review?docs={doc}", headers=other).json() == {"statements": [], "groups": []}
     assert client.patch(f"/accounts/{acc}", headers=other, json={"name": "x"}).status_code == 404
+
+
+def test_report_per_account(client):
+    from openpyxl import load_workbook
+    h = signup(client)
+    upload(client, h, [("bank.csv", BANK)], "HDFC Savings")
+    upload(client, h, [("card.csv", CARD)], "HDFC Regalia", "card")
+    full = client.get("/report", headers=h).json()
+    accounts = {a["account"]: a for a in full["accounts"]}
+    assert accounts["HDFC Savings"]["outflow"] == "500.00" and accounts["HDFC Savings"]["neutral"] == "35000.00"
+    assert accounts["HDFC Regalia"]["outflow"] == "1200.00" and accounts["HDFC Regalia"]["kind"] == "card"
+    assert full["totals"]["outflow"] == "1700.00"  # overall report unchanged
+    card_id = accounts["HDFC Regalia"]["account_id"]
+    one = client.get(f"/report?account_id={card_id}", headers=h).json()
+    assert one["totals"]["outflow"] == "1200.00" and {c["category"] for c in one["categories"]} == {"dining", "card_settlement"}
+    wb = load_workbook(io.BytesIO(client.get("/export.xlsx", headers=h).content))
+    assert wb.sheetnames == ["Summary", "By account", "Flags", "Transactions"]
+    x = client.get(f"/export.xlsx?account_id={card_id}", headers=h)
+    assert "HDFC-Regalia" in x.headers["content-disposition"]
+    assert load_workbook(io.BytesIO(x.content))["Transactions"].max_row == 3  # header + 2 card rows
+    other = signup(client, "other2@example.com")
+    assert client.get(f"/report?account_id={card_id}", headers=other).json()["totals"]["outflow"] == "0"

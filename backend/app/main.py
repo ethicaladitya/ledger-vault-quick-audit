@@ -12,7 +12,7 @@ from .security import hash_password, verify_password, token_for, current_user, c
 from .services.ingestion import import_file, import_path, MAX_FILE
 from .services.passwords import Hints
 from .services.reconciliation import reconcile, base_status
-from .services.report import fy_transactions, totals, category_summary, flags, export_xlsx
+from .services.report import fy_transactions, totals, category_summary, account_summary, flags, export_xlsx
 from .services.rules import CATEGORIES, NEUTRAL, merchant_key, classify
 from . import migrate
 
@@ -409,15 +409,19 @@ def reconciliation(fy: str | None = None, db: Session = Depends(get_db), user: U
 
 
 @app.get("/report")
-def report(fy: str | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    rows = fy_transactions(db, user.workspace_id, fy)
+def report(fy: str | None = None, account_id: int | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """The working paper for the year; with account_id, the same report for one account only."""
+    rows = fy_transactions(db, user.workspace_id, fy, account_id)
     t = totals(rows)
-    return {"totals": {k: str(v) for k, v in t.items()}, "categories": category_summary(rows), "flags": flags(rows, fy)}
+    return {"totals": {k: str(v) for k, v in t.items()}, "categories": category_summary(rows), "flags": flags(rows, fy),
+            "accounts": account_summary(fy_transactions(db, user.workspace_id, fy))}
 
 
 @app.get("/export.xlsx")
-def export(fy: str | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    data = export_xlsx(db, user.workspace_id, fy)
-    name = f"ledgervault-working-paper-{fy or 'all'}.xlsx"
+def export(fy: str | None = None, account_id: int | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    data = export_xlsx(db, user.workspace_id, fy, account_id)
+    account = db.query(FinancialAccount).filter_by(id=account_id, workspace_id=user.workspace_id).first() if account_id else None
+    suffix = "-" + re.sub(r"[^A-Za-z0-9]+", "-", account.name).strip("-") if account else ""
+    name = f"ledgervault-working-paper-{fy or 'all'}{suffix}.xlsx"
     return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})

@@ -407,7 +407,7 @@ export function Transactions({ api, fy, version, initialStatus }: ViewProps & { 
         </div>
       )}
       {flash && <p className="notice">{flash}</p>}
-      {status === "exceptions" || status === "needs_review" ? <p className="notice">Pick the right category for each row. Choosing the suggested category again confirms it and clears it from this list.</p> : null}
+      {status === "exceptions" || status === "needs_review" ? <p className="notice">To clear a row from this list, pick the right category, or click <b>Confirm</b> to keep the suggested one. Notes (e.g. “loan from father”) are for your CA and appear in the Excel export; they don't clear the row on their own.</p> : null}
       <section className="panel">
         <div className="panelhead"><h2>{total} transactions</h2><span>Showing {items?.length ? page * PAGE + 1 : 0}–{page * PAGE + (items?.length ?? 0)}</span></div>
         {!items ? <div className="empty">Loading…</div> : items.length === 0 ? <div className="empty">No transactions match these filters.</div> : (
@@ -442,11 +442,27 @@ export function Transactions({ api, fy, version, initialStatus }: ViewProps & { 
   );
 }
 
-function NoteInput({ value, onSave }: { value: string; onSave: (v: string) => void }) {
+function NoteInput({ value, onSave }: { value: string; onSave: (v: string) => Promise<void> | void }) {
   const [v, setV] = useState(value);
+  const [state, setState] = useState<"idle" | "saving" | "saved">("idle");
   useEffect(() => setV(value), [value]);
-  return <input className="note" value={v} placeholder="Add note" maxLength={1000} onChange={e => setV(e.target.value)}
-    onBlur={() => v !== value && onSave(v)} onKeyDown={e => e.key === "Enter" && (e.target as HTMLInputElement).blur()} />;
+  const dirty = v !== value;
+  const save = async () => {
+    if (!dirty) return;
+    setState("saving");
+    await onSave(v);
+    setState("saved");
+    setTimeout(() => setState("idle"), 2000);
+  };
+  return (
+    <div className="noteedit">
+      <input className="note" value={v} placeholder="Add a note for your CA" maxLength={1000} onChange={e => { setV(e.target.value); setState("idle"); }}
+        onBlur={save} onKeyDown={e => e.key === "Enter" && (e.target as HTMLInputElement).blur()} title="Saved when you press Enter or click away" />
+      {dirty && state !== "saving" && <button className="link small" onMouseDown={e => e.preventDefault()} onClick={save}>Save</button>}
+      {state === "saving" && <small className="muted">Saving…</small>}
+      {state === "saved" && !dirty && <small className="pos">Saved ✓</small>}
+    </div>
+  );
 }
 
 // ---------------- Reconciliation ----------------
@@ -498,23 +514,44 @@ export function Reconciliation({ api, fy, version, go }: ViewProps) {
 type ReportData = { totals: Record<string, string>; categories: { category: string; label: string; group: string; itr_hint: string; count: number; debit: string; credit: string }[]; flags: Flag[] };
 const GROUP_LABEL: Record<string, string> = { income: "Income", tax: "Tax paid", deduction_hint: "Possible deductions", investment: "Investments", review: "To review", expense: "Expenses", adjustment: "Adjustments", neutral: "Neutral (excluded)" };
 
+type AccountLine = { account_id: number; account: string; kind: string; count: number; inflow: string; outflow: string; refunds: string; neutral: string; exceptions: number; from: string; to: string };
+
 export function Report({ api, fy, version, go }: ViewProps) {
-  const [data, setData] = useState<ReportData>();
+  const [data, setData] = useState<ReportData & { accounts: AccountLine[] }>();
+  const [accountId, setAccountId] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  useEffect(() => { api.get<ReportData>(`/report?${q(fy)}`).then(setData).catch(e => setError(e.message)); }, [api, fy, version]);
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (fy) params.set("fy", fy);
+    if (accountId) params.set("account_id", accountId);
+    api.get<ReportData & { accounts: AccountLine[] }>(`/report?${params}`).then(setData).catch(e => setError(e.message));
+  }, [api, fy, version, accountId]);
+  const selected = data?.accounts.find(a => String(a.account_id) === accountId);
   const download = async () => {
     setBusy(true); setError("");
-    try { await api.download(`/export.xlsx?${q(fy)}`, `ledgervault-working-paper-${fy || "all"}.xlsx`); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+    const params = new URLSearchParams();
+    if (fy) params.set("fy", fy);
+    if (accountId) params.set("account_id", accountId);
+    const suffix = selected ? `-${selected.account.replace(/[^A-Za-z0-9]+/g, "-")}` : "";
+    try { await api.download(`/export.xlsx?${params}`, `ledgervault-working-paper-${fy || "all"}${suffix}.xlsx`); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
   return (
     <>
       <header>
         <div><p className="eyebrow">For your CA {fy && `· FY ${fy}`}</p><h1>Working paper</h1></div>
-        <button onClick={download} disabled={busy}>{busy ? "Preparing…" : "Download Excel"}</button>
+        <div className="actions tight">
+          <select value={accountId} onChange={e => setAccountId(e.target.value)} aria-label="Report scope">
+            <option value="">All accounts</option>
+            {data?.accounts.map(a => <option key={a.account_id} value={a.account_id}>{a.account}</option>)}
+          </select>
+          <button onClick={download} disabled={busy}>{busy ? "Preparing…" : selected ? "Download this account" : "Download Excel"}</button>
+        </div>
       </header>
       {error && <p className="error">{error}</p>}
-      <p className="explain">The Excel file has three sheets: a Summary by category with ITR notes, the audit Flags, and every Transaction with its source file and row. It's a provisional working paper, not a tax computation. Use it alongside your Form 16, AIS and 26AS.</p>
+      <p className="explain">{selected
+        ? <>Showing <b>{selected.account}</b> only ({selected.kind === "card" ? "credit card" : "bank"}, {selected.from} → {selected.to}). <button className="link inline" onClick={() => setAccountId("")}>Back to all accounts</button></>
+        : <>The Excel file has a Summary by category with ITR notes, a By account sheet (totals per account, plus a category × account table), the audit Flags, and every Transaction with its source file and row. It's a provisional working paper, not a tax computation. Use it alongside your Form 16, AIS and 26AS.</>}</p>
       {data && (
         <>
           <div className="metrics three">
@@ -522,12 +559,31 @@ export function Report({ api, fy, version, go }: ViewProps) {
             <article><p>Money out (net)</p><strong>{money(data.totals.outflow)}</strong></article>
             <article><p>Neutral (excluded)</p><strong>{money(data.totals.neutral)}</strong></article>
           </div>
+          {!selected && data.accounts.length > 0 && (
+            <section className="panel">
+              <div className="panelhead"><h2>By account</h2><span>Click an account to see its own report</span></div>
+              <div className="scroll"><table>
+                <thead><tr><th>Account</th><th>Period</th><th className="num">Transactions</th><th className="num">Money in</th><th className="num">Money out (net)</th><th className="num">Neutral</th><th className="num">Needs attention</th></tr></thead>
+                <tbody>{data.accounts.map(a => (
+                  <tr key={a.account_id} className="clickable" onClick={() => setAccountId(String(a.account_id))}>
+                    <td><b>{a.account}</b><small className="muted block">{a.kind === "card" ? "Credit card" : "Bank"}</small></td>
+                    <td className="nowrap">{a.from} → {a.to}</td>
+                    <td className="num">{a.count}</td>
+                    <td className="num nowrap">{Number(a.inflow) ? money(a.inflow) : "—"}</td>
+                    <td className="num nowrap">{Number(a.outflow) ? money(a.outflow) : "—"}</td>
+                    <td className="num nowrap">{Number(a.neutral) ? money(a.neutral) : "—"}</td>
+                    <td className="num">{a.exceptions || "—"}</td>
+                  </tr>
+                ))}</tbody>
+              </table></div>
+            </section>
+          )}
           <section className="panel">
             <div className="panelhead"><h2>Audit findings</h2><span>{data.flags.length}</span></div>
             <Flags flags={data.flags} />
           </section>
           <section className="panel">
-            <div className="panelhead"><h2>By category</h2><span>Click a row to see its transactions</span></div>
+            <div className="panelhead"><h2>By category{selected ? ` · ${selected.account}` : ""}</h2><span>Click a row to see its transactions</span></div>
             <div className="scroll"><table>
               <thead><tr><th>Category</th><th>Group</th><th className="num">Count</th><th className="num">Out</th><th className="num">In</th><th>ITR note</th></tr></thead>
               <tbody>{data.categories.map(c => (

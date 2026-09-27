@@ -159,3 +159,6 @@ tr.clickable:hover td { background: var(--paper); }
 .groups tr.undecided td { background: var(--warn-bg); }
 .groups .narr { max-width: 460px; overflow-wrap: anywhere; }
 .review .check { margin-top: 14px; }
+.noteedit { display: flex; align-items: center; gap: 6px; }
+.noteedit small { white-space: nowrap; font-size: 12px; }
+header .actions.tight select { padding: 10px; }

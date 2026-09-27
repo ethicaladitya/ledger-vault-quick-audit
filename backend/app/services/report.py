@@ -25,10 +25,12 @@ def inr(v: Decimal) -> str:
     return ("-" if v < 0 else "") + "₹" + ",".join(groups + [tail]) if groups else ("-" if v < 0 else "") + "₹" + tail
 
 
-def fy_transactions(db: Session, workspace_id: int, fy: str | None):
+def fy_transactions(db: Session, workspace_id: int, fy: str | None, account_id: int | None = None):
     q = db.query(Transaction, FinancialAccount).join(FinancialAccount, Transaction.account_id == FinancialAccount.id).filter(FinancialAccount.workspace_id == workspace_id)
     if fy:
         q = q.filter(Transaction.financial_year == fy)
+    if account_id:
+        q = q.filter(Transaction.account_id == account_id)
     return q.order_by(Transaction.txn_date, Transaction.id).all()
 
 
@@ -44,6 +46,23 @@ def totals(rows) -> dict:
             inflow += t.credit
             outflow += t.debit
     return {"inflow": inflow, "outflow": outflow - refunds, "refunds": refunds, "neutral": neutral}
+
+
+def account_summary(rows) -> list[dict]:
+    """One line per account: the same totals as the overall report, split by account."""
+    by_account: dict[int, list] = defaultdict(list)
+    for t, a in rows:
+        by_account[a.id].append((t, a))
+    out = []
+    for acc_rows in by_account.values():
+        a = acc_rows[0][1]
+        tot = totals(acc_rows)
+        dates = [t.txn_date for t, _ in acc_rows]
+        out.append({"account_id": a.id, "account": a.name, "kind": a.kind, "count": len(acc_rows),
+                    "inflow": str(tot["inflow"]), "outflow": str(tot["outflow"]), "refunds": str(tot["refunds"]), "neutral": str(tot["neutral"]),
+                    "exceptions": sum(t.status in {"needs_review", "unmatched", "ambiguous"} for t, _ in acc_rows),
+                    "from": min(dates).isoformat(), "to": max(dates).isoformat()})
+    return sorted(out, key=lambda r: (r["kind"] != "bank", r["account"].lower()))
 
 
 def category_summary(rows) -> list[dict]:
@@ -139,10 +158,10 @@ def flags(rows, fy: str | None) -> list[dict]:
     return out
 
 
-def export_xlsx(db: Session, workspace_id: int, fy: str | None) -> bytes:
+def export_xlsx(db: Session, workspace_id: int, fy: str | None, account_id: int | None = None) -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
-    rows = fy_transactions(db, workspace_id, fy)
+    rows = fy_transactions(db, workspace_id, fy, account_id)
     docs = {d.id: d.filename for d in db.query(SourceDocument).filter_by(workspace_id=workspace_id)}
     wb = Workbook()
     bold = Font(bold=True)
@@ -151,7 +170,8 @@ def export_xlsx(db: Session, workspace_id: int, fy: str | None) -> bytes:
     ws = wb.active
     ws.title = "Summary"
     tot = totals(rows)
-    ws.append([f"LedgerVault working paper — FY {fy or 'all years'}"])
+    scope = f" — {rows[0][1].name}" if account_id and rows else ""
+    ws.append([f"LedgerVault working paper — FY {fy or 'all years'}{scope}"])
     ws["A1"].font = Font(bold=True, size=14)
     ws.append(["Provisional. Prepared from bank/card statements for review by a Chartered Accountant; not a tax computation."])
     ws.append([])
@@ -165,6 +185,30 @@ def export_xlsx(db: Session, workspace_id: int, fy: str | None) -> bytes:
         ws.append([r["label"], r["group"].replace("_", " "), r["count"], float(r["debit"]), float(r["credit"]), r["itr_hint"]])
     for col, width in zip("ABCDEF", [48, 16, 8, 16, 16, 80]):
         ws.column_dimensions[col].width = width
+
+    if not account_id:
+        ba = wb.create_sheet("By account")
+        ba.append(["Account", "Type", "Period", "Transactions", "Money in (₹)", "Money out, net (₹)", "Refunds (₹)", "Neutral (₹)", "Needs attention"])
+        for c in ba[1]:
+            c.font, c.fill = bold, head_fill
+        for r in account_summary(rows):
+            ba.append([r["account"], "Credit card" if r["kind"] == "card" else "Bank", f"{r['from']} to {r['to']}", r["count"],
+                       float(r["inflow"]), float(r["outflow"]), float(r["refunds"]), float(r["neutral"]), r["exceptions"]])
+        # Category × account matrix, so the CA can see where each category came from.
+        accounts = [(r["account_id"], r["account"]) for r in account_summary(rows)]
+        ba.append([])
+        ba.append(["Category (net: in − out)"] + [name for _, name in accounts] + ["Total"])
+        for c in ba[ba.max_row]:
+            c.font, c.fill = bold, head_fill
+        matrix: dict[str, dict[int, Decimal]] = defaultdict(lambda: defaultdict(Decimal))
+        for t, a in rows:
+            matrix[t.category][a.id] += t.credit - t.debit
+        for cat in sorted(matrix, key=lambda k: CATEGORIES.get(k, (k,))[0]):
+            vals = [matrix[cat].get(acc_id, Decimal()) for acc_id, _ in accounts]
+            ba.append([CATEGORIES.get(cat, (cat,))[0]] + [float(v) if v else None for v in vals] + [float(sum(vals))])
+        ba.column_dimensions["A"].width = 44
+        for i in range(2, len(accounts) + 3):
+            ba.column_dimensions[ba.cell(row=1, column=i).column_letter].width = 20
 
     fl = wb.create_sheet("Flags")
     fl.append(["Level", "Flag", "Detail"])
