@@ -132,13 +132,32 @@ def _amt(s: str) -> Decimal:
     return Decimal(s.replace(",", ""))
 
 
+MARKERS = {"cr", "dr", "c", "d", "cr.", "dr."}
+
+
+def clean_line(raw: str) -> str:
+    """Normalise a statement text line: drop currency glyphs and the icons many card statements print after
+    the amount (HDFC's coloured PI dot comes out as "l", "•", "●" or "(cid:3)"), keeping Cr/Dr/C/D markers."""
+    line = re.sub(r"\(cid:\d+\)", " ", raw)
+    line = CURRENCY.sub(" ", line)
+    line = re.sub(r"[•●○◦▪■□►▶✓✔★☆]", " ", line)
+    # Letters glued onto an amount ("100.00l") that aren't a Cr/Dr marker.
+    line = re.sub(r"(\d\.\d{2})([^\d\s.,]{1,2})(?=\s|$)", lambda m: m.group(0) if m.group(2).lower() in MARKERS else m.group(1), line)
+    tokens = re.sub(r"\s+", " ", line).strip().split(" ")
+    # Trailing 1-3 character tokens without digits after the last amount: icons, not data.
+    while len(tokens) > 2 and not re.search(r"\d", tokens[-1]) and len(tokens[-1]) <= 3 and tokens[-1].lower() not in MARKERS \
+            and any(re.fullmatch(rf"[+-]?{AMT}", t) for t in tokens[:-1]):
+        tokens.pop()
+    return " ".join(tokens)
+
+
 def parse_lines(text: str, kind: str, warnings: list[str]) -> list[dict]:
     from .ingestion import parse_date
     opening = re.search(rf"opening balance[^\d-]{{0,40}}({AMOUNT})", text, re.I)
     prev_balance = _amt(opening.group(1)) if opening else None
     rows, guessed, broken, extra_lines = [], 0, 0, 0
     for n, raw in enumerate(text.splitlines(), start=1):
-        line = re.sub(r"\s+", " ", CURRENCY.sub(" ", raw)).strip()
+        line = clean_line(raw)
         m = LINE.match(line)
         if not m:
             # Wrapped narration: a short text-only line right after a transaction.
@@ -155,6 +174,7 @@ def parse_lines(text: str, kind: str, warnings: list[str]) -> list[dict]:
         narration = re.sub(r"^\d{8,}\s+", "", narration)  # leading transaction/serial reference number
         if kind == "card":
             narration = re.sub(r"(\s+[+-]?\s?\d{1,5})+$", "", narration)  # trailing reward-points column ("30", "+ 12")
+            narration = re.sub(r"(\s+[+C`])+$", "", narration)  # a rupee glyph some fonts extract as "C" or "`"
         if d is None or SKIP.search(narration):
             if SKIP.search(narration) and "opening" in narration.lower():
                 amts = AMOUNT_TAIL.findall(m.group(3))

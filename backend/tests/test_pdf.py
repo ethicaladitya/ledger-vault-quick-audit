@@ -125,3 +125,29 @@ def test_failed_pdf_reports_diagnostics(client):
     res = client.post("/imports/upload", headers=h, data={"account_name": "", "kind": "auto"},
                       files=[("files", ("x.pdf", junk, "application/pdf"))]).json()["files"][0]
     assert "Diagnostics:" in res["error"] and "page(s)" in res["error"]
+
+
+def test_tata_neu_hdfc_with_pi_dots():
+    from tests.pdf_fixtures import tata_neu_hdfc_statement
+    info, rows, _ = parse(tata_neu_hdfc_statement())
+    assert info["kind"] == "card" and info["institution"] == "HDFC Bank" and info["last4"] == "45"
+    got = [(r["date"].isoformat(), r["narration"], r["debit"], r["credit"]) for r in rows]
+    assert got == [
+        ("2025-12-02", "UPI-SURESHKUMARMEHAR", Decimal("10.00"), 0),
+        ("2025-12-02", "UPI-SURESHKUMARMEHAR", Decimal("20.00"), 0),
+        ("2025-12-02", "UPI-TUSHAR KANOJIYA SO RAJES", Decimal("256.00"), 0),
+        ("2025-12-02", "TataRechargesMumbai", Decimal("358.90"), 0),
+        ("2025-12-02", "TataRechargesMumbai", 0, Decimal("358.90")),
+        ("2025-12-03", "UPI-SHAH KIRANA", Decimal("45.00"), 0),
+        ("2025-12-05", "PAYMENT RECEIVED NETBANKING", 0, Decimal("12500.00")),
+    ]
+
+
+def test_clean_line_keeps_markers():
+    from app.services.pdf import clean_line
+    assert clean_line("02/12/2025| 20:48 UPI-X ₹ 10.00 l") == "02/12/2025 20:48 UPI-X 10.00"
+    assert clean_line("02/12/2025 SALARY 1,000.00 Cr") == "02/12/2025 SALARY 1,000.00 Cr"
+    assert clean_line("02/12/2025 REFUND 240.00 C") == "02/12/2025 REFUND 240.00 C"
+    assert clean_line("02/12/2025 X (cid:3)10.00(cid:7)") == "02/12/2025 X 10.00"
+    assert clean_line("02/12/2025 X 10.00l") == "02/12/2025 X 10.00"
+    assert clean_line("02/12/2025 X 10.00Cr") == "02/12/2025 X 10.00Cr"

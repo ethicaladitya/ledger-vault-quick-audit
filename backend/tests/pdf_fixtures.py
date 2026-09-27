@@ -109,3 +109,23 @@ def hdfc_new_card_statement() -> bytes:
         "11/10/2025| 20:01    UBER INDIA SYSTEMS BANGALORE          + 3       Rs. 312.40",
         "14/10/2025| 11:11    REVERSAL ZOMATO                                 Rs. 240.00 C",
     ])
+
+
+def tata_neu_hdfc_statement() -> bytes:
+    """Shaped like the Tata Neu Infinity HDFC statement: 'date| time', rupee, PI dot after the amount
+    (extracted as 'l' or a bullet), '+' credits without a dot, an add-on card holder name line."""
+    return _text_pdf([
+        "Tata Neu Infinity HDFC Bank Credit Card Statement   HSN Code: 997113",
+        "Credit Card No. 4854XXXXXXXXXX45   Total Amount Due   Minimum Amount Due   Credit Limit",
+        "Domestic Transactions",
+        "DATE & TIME   TRANSACTION DESCRIPTION   Base NeuCoins*   AMOUNT   PI",
+        "PRIYA SHARMA",
+        "02/12/2025| 20:48   UPI-SURESHKUMARMEHAR                 Rs. 10.00   l",
+        "02/12/2025| 20:49   UPI-SURESHKUMARMEHAR                 Rs. 20.00 l",
+        "02/12/2025| 21:09   UPI-TUSHAR KANOJIYA SO RAJES         Rs. 256.00  •",
+        "02/12/2025| 09:52   TataRechargesMumbai            4     Rs. 358.90l",
+        "02/12/2025| 00:00   TataRechargesMumbai                  + Rs. 358.90",
+        "03/12/2025| 21:03   UPI-SHAH KIRANA                      Rs. 45.00   l",
+        "05/12/2025| 10:15   PAYMENT RECEIVED NETBANKING          + Rs. 12,500.00",
+        "Page 1 of 3",
+    ])
