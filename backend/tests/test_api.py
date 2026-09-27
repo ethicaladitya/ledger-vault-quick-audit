@@ -334,3 +334,25 @@ def test_cred_payments_are_not_pinned_on_the_axis_card(client):
         ("not_identified", ["May 2025"], 1), ("not_identified", ["Jun 2025"], 1), ("not_identified", ["Jul 2025"], 1)]
     assert sum(float(g["amount"]) for g in cred) == 75000
     assert all("Axis Bank Credit Card ••9534" in g["message"] for g in cred)
+
+
+def test_report_checklist_and_heads(client):
+    h = signup(client)
+    bank = ("date,narration,debit,credit\n2025-04-01,SALARY APR ACME,,150000\n2025-04-05,UPI-RAMESH-ramesh@okaxis,25000,\n"
+            "2025-04-10,CREDIT CARD PAYMENT,35000,\n2025-04-15,LIC OF INDIA PREMIUM,24000,\n2025-04-20,NEFT CR-UNKNOWN PARTY,,250000\n"
+            "2025-06-01,SALARY JUN ACME,,150000\n")   # May statement missing between April and June
+    upload(client, h, [("bank.csv", bank)], "HDFC Savings")
+    rep = client.get("/report", headers=h).json()
+    check = {c["key"]: c for c in rep["checklist"]}
+    assert not check["statements"]["done"] and "month(s) missing" in check["statements"]["detail"]
+    assert check["categories"]["count"] == 2 and check["categories"]["action"]["filter"] == "needs_review"
+    assert check["matching"]["count"] == 1          # card bill with no card statement
+    assert check["large_credits"]["count"] == 1
+    heads = {x["key"]: x for x in rep["heads"]}
+    assert heads["income"]["lines"][0] == {"category": "salary", "label": "Salary (take-home credits)", "hint": "Use gross salary and TDS from Form 16", "amount": "300000.00", "count": 2}
+    assert heads["deductions"]["lines"][0]["category"] == "insurance" and heads["deductions"]["total"] == "24000.00"
+    # Explaining the large credit with a category clears that item.
+    big = next(t for t in client.get("/transactions", headers=h).json()["items"] if t["credit"] == "250000.00")
+    client.patch(f"/transactions/{big['id']}", headers=h, json={"category": "business_receipt"})
+    check = {c["key"]: c for c in client.get("/report", headers=h).json()["checklist"]}
+    assert check["large_credits"]["done"] and check["categories"]["count"] == 1

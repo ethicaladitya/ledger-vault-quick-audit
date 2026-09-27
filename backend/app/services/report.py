@@ -694,3 +694,96 @@ def export_xlsx(db: Session, workspace_id: int, fy: str | None, account_id: int 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+# ---------- closing the books: readiness checklist and ITR-head summary ----------
+
+HEADS = [
+    ("income", "Income", [
+        ("salary", "Salary (take-home credits)", "Use gross salary and TDS from Form 16"),
+        ("interest_income", "Interest", "Other sources; savings interest may qualify for 80TTA/80TTB"),
+        ("dividend", "Dividends", "Other sources; match with AIS"),
+        ("rental_income", "Rent received", "House property"),
+        ("business_receipt", "Business / professional receipts", "Business or profession"),
+        ("investment_redemption", "Investment sales / redemptions", "Capital gains: use the broker/AMC statement"),
+        ("tax_refund", "Income-tax refund", "Not income; interest on it is"),
+    ]),
+    ("tax", "Tax paid", [
+        ("tax_payment", "Income tax / TDS paid", "Match with 26AS challans"),
+        ("gst_payment", "GST paid", "Reconcile with GSTR-3B"),
+    ]),
+    ("deductions", "Possible deductions", [
+        ("investment", "Investments (MF, PPF, NPS, FD)", "80C / 80CCD, if eligible"),
+        ("insurance", "Insurance premiums", "Life 80C · health 80D"),
+        ("loan_emi", "Loan EMIs", "Home loan: interest 24(b), principal 80C"),
+        ("rent", "Rent paid", "HRA / 80GG"),
+        ("education", "Tuition fees", "80C, for children"),
+        ("donation", "Donations", "80G, with receipts"),
+    ]),
+]
+
+
+def final_heads(rows) -> list[dict]:
+    by_cat: dict[str, list] = defaultdict(lambda: [Decimal(), 0])
+    for t, _ in rows:
+        amt = t.credit if t.credit > 0 else t.debit
+        by_cat[t.category][0] += amt
+        by_cat[t.category][1] += 1
+    out = []
+    for key, title, items in HEADS:
+        lines = [{"category": c, "label": label, "hint": hint, "amount": str(by_cat[c][0]), "count": by_cat[c][1]}
+                 for c, label, hint in items if by_cat[c][1]]
+        out.append({"key": key, "title": title, "lines": lines, "total": str(sum((Decimal(l["amount"]) for l in lines), Decimal()))})
+    # Spending: everything that is an expense, largest categories first.
+    spend = defaultdict(lambda: [Decimal(), 0])
+    for t, _ in rows:
+        group = CATEGORIES.get(t.category, ("", "review", ""))[1]
+        if group in {"expense"} and t.debit > 0:
+            spend[t.category][0] += t.debit
+            spend[t.category][1] += 1
+    lines = sorted(({"category": c, "label": CATEGORIES[c][0], "hint": "", "amount": str(v[0]), "count": v[1]} for c, v in spend.items()),
+                   key=lambda l: -Decimal(l["amount"]))
+    out.append({"key": "spending", "title": "Spending", "lines": lines, "total": str(sum((Decimal(l["amount"]) for l in lines), Decimal()))})
+    return out
+
+
+def closing_checklist(db, workspace_id: int, fy: str | None, rows, business_mode: bool = False) -> list[dict]:
+    """What still stands between these statements and final books, each with where to fix it."""
+    items = []
+    cov = statement_coverage(db, workspace_id, fy)
+    gaps = []
+    for acc in cov["accounts"]:
+        present = [m for m in cov["months"] if acc["months"][m]["status"] != "missing"]
+        if present:
+            inside = cov["months"][cov["months"].index(present[0]):cov["months"].index(present[-1]) + 1]
+            gaps += [f"{acc['account']} {m}" for m in inside if acc["months"][m]["status"] == "missing"]
+    missing_cards = missing_card_statements(rows)
+    n = len(gaps) + len(missing_cards)
+    items.append({"key": "statements", "title": "Every statement uploaded", "done": n == 0, "count": n,
+                  "detail": ("No gaps between uploaded statements, and every card bill paid from the bank has its card statement."
+                             if n == 0 else
+                             f"{len(gaps)} month(s) missing between uploaded statements" + (f"; {len(missing_cards)} card(s) with bill payments but no statement" if missing_cards else "") + "."),
+                  "action": {"view": "coverage", "filter": "", "label": "Open statement coverage"}})
+    review = [t for t, _ in rows if t.status == "needs_review"]
+    items.append({"key": "categories", "title": "Every transaction categorised", "done": not review, "count": len(review),
+                  "amount": str(sum((t.debit + t.credit for t in review), Decimal())),
+                  "detail": "All transactions have a category." if not review else f"{len(review)} UPI/NEFT or unrecognised transaction(s) need a category.",
+                  "action": {"view": "transactions", "filter": "needs_review", "label": "Categorise"}})
+    open_items = [t for t, _ in rows if t.status in {"unmatched", "ambiguous"}]
+    items.append({"key": "matching", "title": "Card bills and self-transfers matched", "done": not open_items, "count": len(open_items),
+                  "detail": "Every card bill payment and self-transfer has its other side." if not open_items
+                  else f"{len(open_items)} payment(s) have no other side yet: usually a statement that isn't uploaded.",
+                  "action": {"view": "reconciliation", "filter": "", "label": "Open reconciliation"}})
+    big = [t for t, _ in rows if t.credit >= 2 * LAKH and CATEGORIES.get(t.category, ("", "review", ""))[1] == "review" and not t.note]
+    items.append({"key": "large_credits", "title": "Large credits explained", "done": not big, "count": len(big),
+                  "amount": str(sum((t.credit for t in big), Decimal())),
+                  "detail": "Every credit of ₹2 lakh or more has a category or a note." if not big
+                  else f"{len(big)} credit(s) of ₹2 lakh or more have no category or note. The tax department can ask for their source.",
+                  "action": {"view": "transactions", "filter": "needs_review", "label": "Explain them"}})
+    if business_mode:
+        unknown = [t for t, _ in rows if t.purpose == "unknown"]
+        items.append({"key": "purpose", "title": "Business or personal decided", "done": not unknown, "count": len(unknown),
+                      "detail": "Every transaction is marked business or personal." if not unknown
+                      else f"{len(unknown)} transaction(s) are neither business nor personal yet and are left out of the business report.",
+                      "action": {"view": "transactions", "filter": "purpose:unknown", "label": "Decide"}})
+    return items

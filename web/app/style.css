@@ -346,3 +346,59 @@ td { border-bottom-color: #eef2f0; }
   .metrics small { font-size: 11.5px; }
   .content header h1 { font-size: 27px; }
 }
+
+/* ---- Report: closing checklist, final books, tabs ---- */
+.checklist { padding: 26px 28px; }
+.check-head { display: grid; grid-template-columns: 1fr 220px; gap: 24px; align-items: center; margin-bottom: 14px; }
+.check-head h2 { font-size: 21px; }
+.check-head p { margin: 6px 0 0; }
+.progress { height: 10px; border-radius: 99px; background: #e8efeb; overflow: hidden; }
+.progress span { display: block; height: 100%; background: linear-gradient(90deg, #0b6b52, #3aa57e); border-radius: inherit; transition: width .4s ease; }
+.checklist ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.checklist li { display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: center; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.checklist li.todo { border-color: #f0d6b3; background: #fdf8f0; }
+.checklist li b { display: block; font-size: 15.5px; }
+.checklist li small { display: block; color: #5d6f68; font-size: 13.5px; margin-top: 2px; line-height: 1.45; }
+.check-icon { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; font-size: 14px; background: #e3f2eb; color: #0b6b52; font-variant-numeric: tabular-nums; }
+.checklist li.todo .check-icon { background: #f6ddb8; color: #8a5317; }
+.checklist li button { white-space: nowrap; padding: 9px 14px; font-size: 14px; }
+.checklist.ready { border-color: #bfe0cf; background: linear-gradient(180deg, #f3faf6, #fff); }
+
+.books-final { margin-top: 26px; }
+.section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.section-title h2 { font-size: 21px; }
+.section-title span { color: #5d6f68; font-size: 14px; }
+.heads { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+.head { background: #fff; border: 1px solid var(--line); border-radius: 16px; padding: 20px; display: flex; flex-direction: column; border-top: 4px solid #cfe3d9; }
+.head-income { border-top-color: #0b6b52; }
+.head-tax { border-top-color: #3b6fb6; }
+.head-deductions { border-top-color: #7a5bb5; }
+.head-spending { border-top-color: #b5532f; }
+.head-top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.head-top h3 { margin: 0; font-size: 16px; }
+.head-top strong { font-size: 20px; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.head ul { list-style: none; margin: 6px 0 0; padding: 0; }
+.head li { display: flex; justify-content: space-between; gap: 12px; padding: 10px 6px; margin: 0 -6px; border-radius: 8px; border-bottom: 1px solid #f0f3f1; }
+.head li:last-child { border-bottom: 0; }
+.head li:hover { background: #f5f9f7; }
+.head li b { display: block; font-size: 14px; font-weight: 650; }
+.head li small { display: block; color: #72847c; font-size: 12px; line-height: 1.35; margin-top: 2px; }
+.head li em { font-style: normal; text-align: right; font-weight: 700; font-size: 14px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.head li em small { font-weight: 400; }
+.head .small { font-size: 13.5px; margin-top: 10px; }
+.neutral-strip { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 20px; margin-top: 14px; padding: 12px 16px; border-radius: 12px; background: #eef4f1; font-size: 13.5px; color: #33463f; font-variant-numeric: tabular-nums; }
+
+.details { margin-top: 22px; padding-top: 10px; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 0 -24px 14px; padding: 0 20px; overflow-x: auto; }
+.tabs button { background: transparent; color: #5d6f68; border-radius: 0; padding: 14px 14px 12px; font-weight: 650; font-size: 14.5px; border-bottom: 2px solid transparent; white-space: nowrap; }
+.tabs button:hover:not(:disabled) { background: transparent; color: #0d1f1a; }
+.tabs button.on { color: #0b6b52; border-bottom-color: #0b6b52; }
+
+@media (max-width: 1200px) { .heads { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 700px) {
+  .heads { grid-template-columns: 1fr; }
+  .check-head { grid-template-columns: 1fr; }
+  .checklist li { grid-template-columns: auto 1fr; }
+  .checklist li button { grid-column: 2; justify-self: start; }
+  .section-title { flex-direction: column; }
+}

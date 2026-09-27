@@ -12,7 +12,7 @@ from .security import hash_password, verify_password, token_for, current_user, c
 from .services.ingestion import import_file, import_path, MAX_FILE
 from .services.passwords import Hints
 from .services.reconciliation import reconcile, base_status
-from .services.report import fy_transactions, totals, category_summary, account_summary, flags, export_xlsx, purpose_flags, purpose_split, card_reconciliation, books, statement_coverage
+from .services.report import fy_transactions, totals, category_summary, account_summary, flags, export_xlsx, purpose_flags, purpose_split, card_reconciliation, final_heads, closing_checklist, books, statement_coverage
 from .services.rules import CATEGORIES, MATCHED, NEUTRAL, merchant_key, classify
 from . import migrate
 
@@ -485,7 +485,9 @@ def report(fy: str | None = None, account_id: int | None = None, purpose: str | 
     return {"totals": {k: str(v) for k, v in t.items()}, "categories": category_summary(rows),
             "flags": purpose_flags(all_rows, purpose) + flags(rows, fy),
             "accounts": account_summary(fy_transactions(db, user.workspace_id, fy, None, purpose)),
-            "purpose_split": purpose_split(all_rows), "cards": card_reconciliation(rows)}
+            "purpose_split": purpose_split(all_rows), "cards": card_reconciliation(rows),
+            "heads": final_heads(rows),
+            "checklist": closing_checklist(db, user.workspace_id, fy, all_rows, bool(db.get(Workspace, user.workspace_id).business_mode))}
 
 
 @app.get("/books")

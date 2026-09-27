@@ -557,7 +557,9 @@ export function Reconciliation({ api, fy, version, go }: ViewProps) {
 
 // ---------------- Report ----------------
 
-type ReportData = { totals: Record<string, string>; categories: { category: string; label: string; group: string; itr_hint: string; count: number; debit: string; credit: string }[]; flags: Flag[] };
+type CheckItem = { key: string; title: string; done: boolean; count: number; amount?: string; detail: string; action: { view: ViewId; filter: string; label: string } };
+type Head = { key: string; title: string; total: string; lines: { category: string; label: string; hint: string; amount: string; count: number }[] };
+type ReportData = { checklist: CheckItem[]; heads: Head[]; totals: Record<string, string>; categories: { category: string; label: string; group: string; itr_hint: string; count: number; debit: string; credit: string }[]; flags: Flag[] };
 const GROUP_LABEL: Record<string, string> = { income: "Income", tax: "Tax paid", deduction_hint: "Possible deductions", investment: "Investments", review: "To review", expense: "Expenses", adjustment: "Adjustments", neutral: "Neutral (excluded)" };
 
 type AccountLine = { account_id: number; account: string; kind: string; count: number; inflow: string; outflow: string; refunds: string; neutral: string; exceptions: number; from: string; to: string };
@@ -569,11 +571,34 @@ type MissingStatement = { card: string; account_id: number | null; status: "not_
 type CardRecon = { cards: CardLine[]; missing_statements: MissingStatement[]; unmatched_bank_payments: { id: number; date: string; account: string; narration: string; amount: string }[];
   unmatched_bank_total: string; statement_paid_count: number; statement_paid_total: string; total_paid: string; total_purchases: string; cash_paid: string; sft_reportable: boolean };
 
-function CreditCards({ data, go }: { data: CardRecon; go: (v: ViewId, filter?: string) => void }) {
-  if (!data.cards.length && !data.unmatched_bank_payments.length) return null;
+function Checklist({ items, go }: { items: CheckItem[]; go: (v: ViewId, filter?: string) => void }) {
+  const done = items.filter(i => i.done).length;
+  const ready = done === items.length;
   return (
-    <section className="panel">
-      <div className="panelhead"><h2>Credit cards</h2><span>Bill payments are shown to reconcile, never as expenses</span></div>
+    <section className={`panel checklist ${ready ? "ready" : ""}`}>
+      <div className="check-head">
+        <div>
+          <h2>{ready ? "Ready to close the books" : "Before you close the books"}</h2>
+          <p className="muted">{ready ? "Everything checks out. Download the working paper and send it to your CA." : `${done} of ${items.length} checks done. Clear the rest so your final figures are complete.`}</p>
+        </div>
+        <div className="progress" aria-label={`${done} of ${items.length} done`}><span style={{ width: `${(done / Math.max(items.length, 1)) * 100}%` }} /></div>
+      </div>
+      <ul>{items.map(i => (
+        <li key={i.key} className={i.done ? "done" : "todo"}>
+          <span className="check-icon" aria-hidden>{i.done ? "✓" : i.count}</span>
+          <div><b>{i.title}</b><small>{i.detail}{i.amount && !i.done && Number(i.amount) ? ` (${money(i.amount)})` : ""}</small></div>
+          {!i.done && <button className="secondary" onClick={() => go(i.action.view, i.action.filter)}>{i.action.label} →</button>}
+        </li>
+      ))}</ul>
+    </section>
+  );
+}
+
+function CreditCards({ data, go, bare }: { data: CardRecon; go: (v: ViewId, filter?: string) => void; bare?: boolean }) {
+  if (!data.cards.length && !data.unmatched_bank_payments.length) return bare ? <div className="empty">No credit card statements or card bill payments this year.</div> : null;
+  return (
+    <section className={bare ? "" : "panel"}>
+      {!bare && <div className="panelhead"><h2>Credit cards</h2><span>Bill payments are shown to reconcile, never as expenses</span></div>}
       <p className="muted">Card purchases are already counted in expenses under their categories. Paying the card bill only settles them, so it's matched to the bank debit here instead of being counted again.</p>
       {data.cards.length > 0 && (
         <div className="scroll"><table>
@@ -624,6 +649,7 @@ export function Report({ api, fy, version, go, businessMode }: ViewProps) {
   const [data, setData] = useState<ReportData & { accounts: AccountLine[]; purpose_split: PurposeSplit; cards: CardRecon }>();
   const [accountId, setAccountId] = useState<string>("");
   const [scope, setScope] = useState<"" | "business" | "personal">("");
+  const [tab, setTab] = useState<"categories" | "accounts" | "cards" | "findings">("categories");
   useEffect(() => { if (!businessMode) setScope(""); }, [businessMode]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -664,18 +690,35 @@ export function Report({ api, fy, version, go, businessMode }: ViewProps) {
         </div>
       </header>
       {error && <p className="error">{error}</p>}
-      <p className="explain">{selected
-        ? <>Showing <b>{selected.account}</b> only ({selected.kind === "card" ? "credit card" : "bank"}, {selected.from} → {selected.to}). <button className="link inline" onClick={() => setAccountId("")}>Back to all accounts</button></>
-        : <>The Excel file has a Summary by category with ITR notes, a By account sheet (totals per account, plus a category × account table), a Credit cards reconciliation, the audit Flags, and every Transaction with its source file and row. It's a provisional working paper, not a tax computation. Use it alongside your Form 16, AIS and 26AS.</>}</p>
-      {data && (
+      {selected && <p className="explain">Showing <b>{selected.account}</b> only ({selected.kind === "card" ? "credit card" : "bank"}, {selected.from} → {selected.to}). <button className="link inline" onClick={() => setAccountId("")}>Back to all accounts</button></p>}
+      {!data ? <section className="panel"><div className="empty">Loading…</div></section> : (
         <>
-          <div className="metrics three">
-            <article><p>{scope === "business" ? "Business receipts" : "Money in"}</p><strong>{money(data.totals.inflow)}</strong></article>
-            <article><p>{scope === "business" ? "Business expenses (net)" : "Money out (net)"}</p><strong>{money(data.totals.outflow)}</strong></article>
-            {scope
-              ? <article className="clickable" onClick={() => go("transactions", "purpose:unknown")}><p>Purpose not set</p><strong>{data.purpose_split.unknown.count}</strong><small>Excluded until you choose. Click to review →</small></article>
-              : <article><p>Card bill payments</p><strong>{money(data.cards.total_paid)}</strong><small>Not an expense · reconciled below{Number(data.totals.self_transfers) ? ` · self-transfers ${money(data.totals.self_transfers)}` : ""}</small></article>}
-          </div>
+          <Checklist items={data.checklist} go={go} />
+
+          <section className="books-final">
+            <div className="section-title"><h2>Final books</h2><span>Grouped the way your return is. Click any line to see its transactions.</span></div>
+            <div className="heads">
+              {data.heads.map(h => (
+                <article key={h.key} className={`head head-${h.key}`}>
+                  <div className="head-top"><h3>{h.title}</h3><strong>{money(h.total)}</strong></div>
+                  {h.lines.length === 0 ? <p className="muted small">Nothing found this year.</p> : (
+                    <ul>{(h.key === "spending" ? h.lines.slice(0, 7) : h.lines).map(l => (
+                      <li key={l.category} className="clickable" onClick={() => go("transactions", `category:${l.category}`)}>
+                        <span><b>{l.label}</b>{l.hint && <small>{l.hint}</small>}</span>
+                        <em>{money(l.amount)}<small>{l.count} txn{l.count === 1 ? "" : "s"}</small></em>
+                      </li>
+                    ))}</ul>
+                  )}
+                  {h.key === "spending" && h.lines.length > 7 && <button className="link small" onClick={() => setTab("categories")}>All {h.lines.length} spending categories →</button>}
+                </article>
+              ))}
+            </div>
+            <div className="neutral-strip">
+              <span><b>Not income or spending:</b> card bill payments {money(data.cards.total_paid)}{Number(data.totals.self_transfers) ? <> · self-transfers {money(data.totals.self_transfers)}</> : null}{Number(data.totals.card_emi) ? <> · card EMIs {money(data.totals.card_emi)}</> : null}</span>
+              <span className="muted">Money in {money(data.totals.inflow)} · money out (net of refunds) {money(data.totals.outflow)}</span>
+            </div>
+          </section>
+
           {businessMode && !scope && (
             <div className="metrics three">
               <article className="clickable" onClick={() => setScope("business")}><p>Business</p><strong>{money(data.purpose_split.business.outflow)}</strong><small>out · {money(data.purpose_split.business.inflow)} in · {data.purpose_split.business.count} txns</small></article>
@@ -683,9 +726,29 @@ export function Report({ api, fy, version, go, businessMode }: ViewProps) {
               <article className="clickable" onClick={() => go("transactions", "purpose:unknown")}><p>Purpose not set</p><strong>{data.purpose_split.unknown.count}</strong><small>Click to decide →</small></article>
             </div>
           )}
-          {!selected && data.accounts.length > 0 && (
-            <section className="panel">
-              <div className="panelhead"><h2>By account</h2><span>Click an account to see its own report</span></div>
+
+          <section className="panel details">
+            <div className="tabs" role="tablist">
+              {([["categories", "Categories"], ["accounts", "Accounts"], ["cards", "Credit cards"], ["findings", `All findings (${data.flags.length})`]] as const)
+                .filter(([k]) => !(k === "accounts" && selected) && !(k === "cards" && scope))
+                .map(([k, label]) => <button key={k} role="tab" aria-selected={tab === k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{label}</button>)}
+            </div>
+            {tab === "categories" && (
+              <>
+                <div className="scroll"><table>
+                  <thead><tr><th>Category</th><th>Group</th><th className="num">Count</th><th className="num">Out</th><th className="num">In</th><th>ITR note</th></tr></thead>
+                  <tbody>{data.categories.filter(c => c.group !== "neutral").map(c => (
+                    <tr key={c.category} className="clickable" onClick={() => go("transactions", `category:${c.category}`)}>
+                      <td><b>{c.label}</b></td><td>{GROUP_LABEL[c.group] ?? c.group}</td><td className="num">{c.count}</td>
+                      <td className="num nowrap">{Number(c.debit) ? money(c.debit) : "—"}</td><td className="num nowrap">{Number(c.credit) ? money(c.credit) : "—"}</td>
+                      <td><small className="muted">{c.itr_hint}</small></td>
+                    </tr>
+                  ))}</tbody>
+                </table></div>
+                <p className="muted small-note">Card bill payments and transfers between your own accounts aren't income or spending, so they're listed under <button className="link inline" onClick={() => setTab("cards")}>Credit cards</button> and on the <button className="link inline" onClick={() => go("reconciliation")}>Reconciliation</button> page.</p>
+              </>
+            )}
+            {tab === "accounts" && !selected && (
               <div className="scroll"><table>
                 <thead><tr><th>Account</th><th>Period</th><th className="num">Transactions</th><th className="num">Money in</th><th className="num">Money out (net)</th><th className="num">Neutral</th><th className="num">Needs attention</th></tr></thead>
                 <tbody>{data.accounts.map(a => (
@@ -700,27 +763,11 @@ export function Report({ api, fy, version, go, businessMode }: ViewProps) {
                   </tr>
                 ))}</tbody>
               </table></div>
-            </section>
-          )}
-          <section className="panel">
-            <div className="panelhead"><h2>Audit findings</h2><span>{data.flags.length}</span></div>
-            <Flags flags={data.flags} />
+            )}
+            {tab === "cards" && !scope && <CreditCards data={data.cards} go={go} bare />}
+            {tab === "findings" && <Flags flags={data.flags} limit={50} />}
           </section>
-          {!scope && <CreditCards data={data.cards} go={go} />}
-          <section className="panel">
-            <div className="panelhead"><h2>By category{selected ? ` · ${selected.account}` : ""}</h2><span>Click a row to see its transactions</span></div>
-            <div className="scroll"><table>
-              <thead><tr><th>Category</th><th>Group</th><th className="num">Count</th><th className="num">Out</th><th className="num">In</th><th>ITR note</th></tr></thead>
-              <tbody>{data.categories.filter(c => c.group !== "neutral").map(c => (
-                <tr key={c.category} className="clickable" onClick={() => go("transactions", `category:${c.category}`)}>
-                  <td><b>{c.label}</b></td><td>{GROUP_LABEL[c.group] ?? c.group}</td><td className="num">{c.count}</td>
-                  <td className="num nowrap">{Number(c.debit) ? money(c.debit) : "—"}</td><td className="num nowrap">{Number(c.credit) ? money(c.credit) : "—"}</td>
-                  <td><small className="muted">{c.itr_hint}</small></td>
-                </tr>
-              ))}</tbody>
-            </table></div>
-            {data.categories.some(c => c.group === "neutral") && <p className="muted small-note">Credit card bill payments and transfers between your own accounts aren't income or expenses, so they're not listed here. See <b>Credit cards</b> above and the <button className="link inline" onClick={() => go("reconciliation")}>Reconciliation</button> page.</p>}
-          </section>
+          <p className="explain small-note">The Excel download has the same figures: Summary with ITR notes, By account, Credit cards, Flags and every Transaction with its source file and row. It's a provisional working paper, not a tax computation. Use it alongside Form 16, AIS and 26AS.</p>
         </>
       )}
     </>
