@@ -111,6 +111,14 @@ def reconcile(db: Session, workspace_id: int) -> dict:
     pairs3, _ = _pair(open_bills, [c for c in card_credits if c.match_group is None], -1, 3, near)
     for d, c in pairs3:
         link(d, c, "confirmed_settlement")
+    # A card credit whose wording read as a refund, but which is exactly one bank card-bill payment's other leg
+    # (same amount, −1..+3 days, unique both ways), is that bill payment arriving: not a refund.
+    refund_like = [c for c in txns if kind[c.id] == "card" and c.credit > 0 and c.category == "refund_reversal"
+                   and c.category_source != "user" and c.match_group is None]
+    pairs4, _ = _pair([d for d in bank_bills if d.match_group is None], refund_like, -1, 3)
+    for d, c in pairs4:
+        _relabel(c, "card_settlement")
+        link(d, c, "confirmed_settlement")
     # Then bank payments that pay the total due of an uploaded card statement (its credit is on the next statement).
     statement_paid = _pay_statements(db, workspace_id, [d for d in bank_bills if d.match_group is None], txns, kind)
     for d in amb:

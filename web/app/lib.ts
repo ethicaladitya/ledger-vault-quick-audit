@@ -62,4 +62,9 @@ export type Books = {
   totals: { money_in: string; money_out: string; refunds: string; net_spend: string; net: string; count: number };
   excluded: { label: string; count: number; matched: number; debit: string; credit: string }[];
   gaps: CardGap[]; gap_total: string;
+  cards: {
+    cards: { account_id: number; account: string; paid: string; payments: number; purchases: string; charges: string; refunds: string; emi: string;
+      net_spend: string; from: string | null; to: string | null; categories: { category: string; label: string; amount: string }[] }[];
+    paid_total: string; spend_total: string; unassigned: { count: number; amount: string };
+  };
 };

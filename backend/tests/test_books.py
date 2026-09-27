@@ -72,3 +72,24 @@ def test_card_credits_are_never_income_and_card_debits_never_bill_payments():
     assert classify("SWIGGY BANGALORE", False, "bank", {"swiggy bangalore": "dining"}) != "dining"
     assert classify("ACME PVT", True, "bank", {"acme pvt": "salary"}) != "salary"
     assert category_fits("dining", True) and not category_fits("dining", False) and not category_fits("salary", True)
+
+
+def test_bill_payment_worded_like_a_refund_is_excluded_and_cards_break_down(client):
+    h = signup(client)
+    upload(client, h, [("bank.csv", "date,narration,debit,credit\n2025-05-10,UPI/DR/1/CRED/cred.club@axisb/Payment,2000,\n")], "HDFC Savings")
+    card = ("date,narration,debit,credit\n"
+            "2025-05-01,SWIGGY BANGALORE,1500,\n"
+            "2025-05-02,AMAZON PAY INDIA,900,\n"
+            "2025-05-04,AMAZON PAY INDIA - 12,,400\n"          # a real refund (reward points reversed)
+            "2025-05-06,LATE FEE,100,\n"
+            "2025-05-10,DREAMPLUG TECHNOLOGIES,,2000\n")     # the CRED payment arriving, worded like a merchant
+    res = upload(client, h, [("card.csv", card)], "HDFC Regalia", "card")
+    assert res["reconciliation"]["confirmed"] == 1
+    b = client.get("/books", headers=h).json()
+    assert [e["narration"] for e in b["entries"]] == ["SWIGGY BANGALORE", "AMAZON PAY INDIA", "AMAZON PAY INDIA - 12", "LATE FEE"]
+    assert b["totals"]["refunds"] == "400.00"
+    c = b["cards"]["cards"][0]
+    assert (c["paid"], c["payments"], c["purchases"], c["charges"], c["refunds"], c["net_spend"]) == \
+        ("2000.00", 1, "2400.00", "100.00", "400.00", "2100.00")
+    assert [(k["category"], k["amount"]) for k in c["categories"]] == [("dining", "1500.00"), ("shopping", "900.00")]
+    assert b["cards"]["paid_total"] == "2000.00" and b["cards"]["unassigned"]["count"] == 0

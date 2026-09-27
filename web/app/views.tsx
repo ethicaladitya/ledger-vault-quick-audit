@@ -834,6 +834,33 @@ export function BooksView({ api, fy, version, go, businessMode }: ViewProps) {
             <article><p>Money in</p><strong>{money(data.totals.money_in)}</strong><small>Excludes refunds</small></article>
             <article><p>Net</p><strong>{money(data.totals.net)}</strong><small>In − out, refunds included</small></article>
           </div>
+          {data.cards.cards.length > 0 && (
+            <section className="panel">
+              <div className="panelhead"><h2>Credit cards</h2><span>Paid to each card, then what its statements say it went on</span></div>
+              <div className="scroll"><table>
+                <thead><tr><th>Card</th><th className="num">Paid to card</th><th className="num">Purchases</th><th className="num">Fees & charges</th><th className="num">Refunds</th><th className="num">Net spend</th><th className="num">EMI instalments</th></tr></thead>
+                <tbody>{data.cards.cards.map(c => (
+                  <tr key={c.account_id}>
+                    <td><b>{c.account}</b><small className="muted block">{c.from} → {c.to}</small>
+                      {c.categories.length > 0 && <details><summary>By category</summary><ul className="plain">{c.categories.map(k => <li key={k.category}>{k.label} · <b>{money(k.amount)}</b></li>)}</ul></details>}</td>
+                    <td className="num nowrap">{money(c.paid)}<small className="muted block">{c.payments} payment{c.payments === 1 ? "" : "s"}</small></td>
+                    <td className="num nowrap">{money(c.purchases)}</td>
+                    <td className="num nowrap">{Number(c.charges) ? money(c.charges) : "—"}</td>
+                    <td className="num nowrap">{Number(c.refunds) ? money(c.refunds) : "—"}</td>
+                    <td className="num nowrap"><b>{money(c.net_spend)}</b></td>
+                    <td className="num nowrap">{Number(c.emi) ? money(c.emi) : "—"}</td>
+                  </tr>
+                ))}
+                {data.cards.unassigned.count > 0 && (
+                  <tr><td>Card bills not tied to an uploaded card<small className="muted block">{data.cards.unassigned.count} payment{data.cards.unassigned.count === 1 ? "" : "s"} · see the warning above</small></td>
+                    <td className="num nowrap">{money(data.cards.unassigned.amount)}</td><td colSpan={5} /></tr>
+                )}
+                <tr><td><b>Total</b></td><td className="num nowrap"><b>{money(data.cards.paid_total)}</b></td><td colSpan={3} /><td className="num nowrap"><b>{money(data.cards.spend_total)}</b></td><td /></tr>
+                </tbody>
+              </table></div>
+              <p className="muted small-note">Bill payments aren't spending: the card purchases listed in the ledger below are. Paid and spent differ by timing (a bill is paid the month after the purchases) and by statements not uploaded. Refunds here are merchant refunds, reversals and cashback, never bill payments.</p>
+            </section>
+          )}
           <section className="panel">
             <div className="panelhead"><h2>Ledger</h2><span>{filtered ? `${shown.length} of ${data.entries.length} shown · running net is for all accounts` : `${data.entries.length} transactions`}</span></div>
             <div className="scroll"><table>

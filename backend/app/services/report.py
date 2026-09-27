@@ -221,6 +221,63 @@ def card_reconciliation(rows) -> dict:
     }
 
 
+def card_breakdown(rows) -> dict:
+    """Per credit card: what was paid to it, then what its statements say that money went on.
+
+    paid: bill payments on the card's statements, plus bank payments that paid one of its statements' total due
+    (their credit is on a later, missing statement). From the statements: purchases by category, charges/fees,
+    refunds, EMI instalments (a purchase converted to EMI is counted once, as the purchase), and net spend.
+    Bank card-bill payments tied to no card are listed on their own so paid totals still add up."""
+    docs_account = {t.document_id: a.id for t, a in rows if a.kind == "card"}
+    cards: dict[int, dict] = {}
+
+    def card(a):
+        return cards.setdefault(a.id, {"account_id": a.id, "account": a.name, "paid": Decimal(), "payments": 0, "purchases": Decimal(),
+                                       "charges": Decimal(), "refunds": Decimal(), "emi": Decimal(), "categories": defaultdict(Decimal),
+                                       "from": None, "to": None})
+    unassigned = {"count": 0, "amount": Decimal()}
+    for t, a in rows:
+        if a.kind == "card":
+            c = card(a)
+            c["from"] = min(c["from"] or t.txn_date, t.txn_date)
+            c["to"] = max(c["to"] or t.txn_date, t.txn_date)
+            if t.category == "card_settlement" and t.credit > 0:
+                c["paid"] += t.credit
+                c["payments"] += 1
+            elif t.category == "card_emi":
+                c["emi"] += t.debit
+            elif t.credit > 0:
+                c["refunds"] += t.credit
+            elif t.category == "bank_charges":
+                c["charges"] += t.debit
+            elif t.debit > 0:
+                c["purchases"] += t.debit
+                c["categories"][t.category] += t.debit
+        elif t.category == "card_settlement" and t.debit > 0 and not (t.match_group and not t.match_group.startswith("doc:")):
+            # Not linked to a card-side credit (that one is counted on the card): either it paid an uploaded
+            # statement ("doc:<id>") or no card is known.
+            doc_id = int(t.match_group[4:]) if t.match_group else None
+            if doc_id in docs_account:
+                c = cards.get(docs_account[doc_id])
+                if c is not None:
+                    c["paid"] += t.debit
+                    c["payments"] += 1
+                    continue
+            unassigned["count"] += 1
+            unassigned["amount"] += t.debit
+    out = []
+    for c in sorted(cards.values(), key=lambda c: c["account"].lower()):
+        cats = sorted(c.pop("categories").items(), key=lambda kv: -kv[1])
+        spend = c["purchases"] + c["charges"] - c["refunds"]
+        out.append({**{k: (str(v) if isinstance(v, Decimal) else v) for k, v in c.items()},
+                    "from": c["from"].isoformat() if c["from"] else None, "to": c["to"].isoformat() if c["to"] else None,
+                    "net_spend": str(spend),
+                    "categories": [{"category": k, "label": CATEGORIES.get(k, (k,))[0], "amount": str(v)} for k, v in cats]})
+    return {"cards": out, "paid_total": str(sum((Decimal(c["paid"]) for c in out), Decimal()) + unassigned["amount"]),
+            "spend_total": str(sum((Decimal(c["net_spend"]) for c in out), Decimal())),
+            "unassigned": {"count": unassigned["count"], "amount": str(unassigned["amount"])}}
+
+
 EXCLUDED_LABELS = {
     ("card_settlement", "bank"): "Credit card bills paid from the bank",
     ("card_settlement", "card"): "Bill payments received on the cards",
@@ -266,7 +323,8 @@ def books(rows) -> dict:
             "totals": {"money_in": str(money_in), "money_out": str(money_out), "refunds": str(refunds),
                        "net_spend": str(money_out - refunds), "net": str(running), "count": len(entries)},
             "excluded": [{**e, "debit": str(e["debit"]), "credit": str(e["credit"])} for e in excluded.values()],
-            "gaps": gaps, "gap_total": str(sum((Decimal(g["amount"]) for g in gaps), Decimal()))}
+            "gaps": gaps, "gap_total": str(sum((Decimal(g["amount"]) for g in gaps), Decimal())),
+            "cards": card_breakdown(rows)}
 
 
 def purpose_split(rows) -> dict:
@@ -474,6 +532,23 @@ def export_xlsx(db: Session, workspace_id: int, fy: str | None, account_id: int 
         c.font, c.fill = bold, head_fill
     for e in bk["excluded"]:
         bs.append([e["label"], None, None, e["count"], e["matched"], float(e["debit"]), float(e["credit"])])
+    cb = bk["cards"]
+    if cb["cards"]:
+        bs.append([])
+        bs.append(["Credit cards: what was paid to each card, and what its statements say it went on"])
+        bs[bs.max_row][0].font = bold
+        bs.append(["Card", "Statements cover", None, "Paid to card (₹)", "Purchases (₹)", "Fees & charges (₹)", "Refunds (₹)", "Net spend (₹)", "EMI instalments (₹)"])
+        for c in bs[bs.max_row]:
+            c.font, c.fill = bold, head_fill
+        for c in cb["cards"]:
+            bs.append([c["account"], f"{c['from']} to {c['to']}", None, float(c["paid"]), float(c["purchases"]), float(c["charges"]),
+                       float(c["refunds"]), float(c["net_spend"]), float(c["emi"])])
+            for cat in c["categories"]:
+                bs.append([f"    {cat['label']}", None, None, None, float(cat["amount"])])
+        if cb["unassigned"]["count"]:
+            bs.append([f"Card bill payments not tied to any uploaded card ({cb['unassigned']['count']})", None, None, float(cb["unassigned"]["amount"])])
+        bs.append(["Total", None, None, float(cb["paid_total"]), None, None, None, float(cb["spend_total"])])
+        bs[bs.max_row][0].font = bold
     if bk["gaps"]:
         bs.append([])
         bs.append([f"Not in the books yet: {inr(Decimal(bk['gap_total']))} of card bills paid to cards whose statements aren't uploaded "
