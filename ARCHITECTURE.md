@@ -18,7 +18,7 @@ Readers turn CSV (delimiter sniffed, UTF-8/cp1252), XLSX (openpyxl), XLS (xlrd) 
 
 ## PDFs (`services/pdf.py`, `services/passwords.py`)
 
-`unlock` tries candidate passwords with pikepdf: empty, then passwords the user typed, then formulas built from the name, date of birth, PAN and card/customer numbers supplied with the request. These hints live only in request memory. `read_pdf` (pdfplumber) extracts text and tables; image-only PDFs are rejected. `detect` scores card markers (minimum amount due, credit limit…) against bank markers (IFSC, opening balance…) and finds the institution and last four digits, which gives auto-names like "HDFC Bank Credit Card ••9876". Extraction first tries tables through the spreadsheet header mapper, then parses date-led text lines. For bank statements, the running-balance delta decides debit or credit, and breaks in the balance chain are reported as warnings.
+`unlock` tries candidate passwords with pikepdf: empty, then passwords the user typed, then formulas built from the name, date of birth, PAN and card/customer numbers supplied with the request. These hints live only in request memory. `read_pdf` (pdfplumber) extracts text and tables; image-only PDFs are rejected. `detect` scores card markers (minimum amount due, credit limit…) against bank markers (IFSC, opening balance…) and finds the institution and last four digits, which gives auto-names like "HDFC Bank Credit Card ••9876". Extraction first tries tables through the spreadsheet header mapper, then parses date-led text lines. For bank statements, the running-balance delta decides debit or credit, and breaks in the balance chain are reported as warnings. For card statements, `card_totals_check` requires previous balance + purchases − payments/credits = total due for amounts printed outside the transaction lines; when nothing fits, the import warns that the statement doesn't add up (rows missing or signs flipped). HDFC's `+ ₹` credits (the ₹ glyph extracts as "C") and descriptions printed above the date line are handled explicitly. `python -m app.tools.inspect_folder <dir>` writes a masked layout report (digits → 9, words → Xxxx) for adding a new layout without sharing personal data.
 
 ## Post-upload review and learning
 
@@ -34,15 +34,15 @@ Identical files are skipped by SHA-256 per workspace. Rows overlapping an earlie
 
 ## Classification (`services/rules.py`)
 
-Ordered, direction-aware regex rules map narrations to categories. Each category has a group (income, tax, deduction hint, investment, expense, neutral, review) and an ITR hint. On a card account, payment-like credits are card settlements. User edits set `category_source=user` and are never overwritten.
+Ordered, direction-aware regex rules map narrations to categories. Each category has a group (income, tax, deduction hint, investment, expense, neutral, review) and an ITR hint. `category_fits` keeps categories to the direction they make sense in: a credit on a card is only a bill payment, a refund or an EMI conversion (never income), a card debit is never a bill payment, and a learned payee rule is ignored in the other direction. User edits set `category_source=user` and are never overwritten.
 
 ## Reconciliation (`services/reconciliation.py`)
 
-Recomputed from scratch for the workspace after every import or edit. A card-bill debit is linked to a card-payment credit in another account with the same amount within −2…+7 days. A self-transfer debit is linked to a credit in another account within −1…+3 days. A link is made only when the pair is unique in both directions; otherwise the entry is marked `ambiguous`. Statuses: ok, needs_review, unmatched, ambiguous, confirmed_settlement, confirmed_transfer.
+Recomputed from scratch for the workspace after every import or edit. A card-bill debit is linked to a card-payment credit in another account with the same amount within −2…+7 days; payment credits still open are then matched to bank debits labelled BBPS / auto-debit / UPI / NEFT / uncategorised (CRED payments rarely name the card). A link that relabels a leg sets `category_source=link`, which is undone at the start of every run. A self-transfer debit is linked to a credit in another account within −1…+3 days. A link is made only when the pair is unique in both directions; otherwise the entry is marked `ambiguous`. Statuses: ok, needs_review, unmatched, ambiguous, confirmed_settlement, confirmed_transfer.
 
 ## Reports (`services/report.py`)
 
-These produce FY totals (card settlements and self-transfers are excluded; refunds net off spending), a category summary, audit flags (unmatched settlements, unidentified credits ≥ ₹2 lakh, cash deposits and card payments against the ₹10 lakh SFT thresholds, interest/dividends/salary reminders, months with no statement), and the XLSX export.
+These produce FY totals (card settlements and self-transfers are excluded; refunds net off spending), a category summary, the Books ledger (`books`: every bank and card row once in date order with a running net, both legs of card bills, self-transfers and card EMI conversions left out and totalled, bill payments to cards with no statement listed as missing spending), audit flags (unmatched settlements, unidentified credits ≥ ₹2 lakh, cash deposits and card payments against the ₹10 lakh SFT thresholds, interest/dividends/salary reminders, months with no statement), and the XLSX export.
 
 ## Security model
 

@@ -95,8 +95,9 @@ DEPLOY_KEY=~/.ssh/your-key.pem
 3. **Review this import**: check that each file landed in the right account (rename it or switch bank/card if needed), fix any category groups highlighted as unidentified, and click **Confirm all**.
 4. **Overview** shows money in and out and the **audit findings** for the year you pick in the sidebar.
 5. **Transactions → Needs attention**: choose a category for each flagged row (or click **Confirm**), and add notes like *"loan from father"* for your CA.
-6. **Reconciliation** shows which card payments and transfers were matched, and what's still missing.
-7. **Report & export → Download Excel**, and send it to your CA with your Form 16, AIS and 26AS. Pick an account in the dropdown for a per-account report, or use the **By account** table.
+6. **Books** is one ledger of every bank and credit card transaction in date order, with a running total. Paying a card bill just moves money from the bank to the card, so neither side of it appears: the card purchases it paid for are already listed. If your bank paid a card whose statements aren't uploaded, the page says how much card spending is missing and for which months.
+7. **Reconciliation** shows which card payments and transfers were matched, and what's still missing.
+8. **Report & export → Download Excel** (it includes the Books sheet), and send it to your CA with your Form 16, AIS and 26AS. Pick an account in the dropdown for a per-account report, or use the **By account** table.
 
 **Have business income too?** Go to **Settings**, turn on *Track business and personal separately*, and mark each account as Business, Personal or Mixed. Transactions then get a **Purpose** column (with "apply to all similar"), the upload review lets you set purpose per payee, and **Report & export → Business only** gives a working paper and Excel with just your business receipts and expenses. It also tells you how many transactions were excluded because their purpose isn't set yet.
 
