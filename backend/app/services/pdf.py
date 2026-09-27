@@ -128,7 +128,9 @@ def _logical_lines(text: str) -> list[str]:
                     break
                 parts.append(nxt)
                 j += 1
-                if AMOUNT_TAIL.search(" ".join(parts)):
+                # Check only the newly appended line; the date itself also
+                # contains numeric tokens that look like amounts to regex.
+                if AMOUNT_TAIL.search(nxt):
                     break
             out.append(" ".join(parts))
             i = j
