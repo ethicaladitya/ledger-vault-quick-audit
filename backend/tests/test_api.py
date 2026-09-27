@@ -178,7 +178,7 @@ def test_report_per_account(client):
     one = client.get(f"/report?account_id={card_id}", headers=h).json()
     assert one["totals"]["outflow"] == "1200.00" and {c["category"] for c in one["categories"]} == {"dining", "card_settlement"}
     wb = load_workbook(io.BytesIO(client.get("/export.xlsx", headers=h).content))
-    assert wb.sheetnames == ["Summary", "By account", "Flags", "Transactions"]
+    assert wb.sheetnames == ["Summary", "By account", "Credit cards", "Flags", "Transactions"]
     x = client.get(f"/export.xlsx?account_id={card_id}", headers=h)
     assert "HDFC-Regalia" in x.headers["content-disposition"]
     assert load_workbook(io.BytesIO(x.content))["Transactions"].max_row == 3  # header + 2 card rows
@@ -266,3 +266,29 @@ def test_business_personal_split_and_report(client):
     assert tx.cell(row=1, column=15).value == "Purpose" and {tx.cell(row=r, column=15).value for r in range(2, tx.max_row + 1)} == {"business"}
     # A card bill payment has no purpose to set.
     assert client.patch(f"/transactions/{by['CREDIT CARD PAYMENT']['id']}", headers=h, json={"purpose": "business"}).status_code == 400
+
+
+def test_credit_card_reconciliation(client):
+    from openpyxl import load_workbook
+    h = signup(client)
+    bank = ("date,narration,debit,credit\n2025-04-10,CREDIT CARD PAYMENT HDFC,35000,\n"
+            "2025-04-20,CC PAYMENT AXIS 4455,8000,\n2025-04-21,SWIGGY,300,\n")
+    card = ("date,narration,debit,credit\n2025-04-03,AMAZON,20000,\n2025-04-05,ZOMATO,1500,\n2025-04-06,AMAZON REFUND,,2000\n"
+            "2025-04-11,PAYMENT RECEIVED THANK YOU,,35000\n2025-04-25,CASH PAYMENT RECEIVED,,5000\n")
+    upload(client, h, [("bank.csv", bank)], "HDFC Savings")
+    upload(client, h, [("card.csv", card)], "HDFC Regalia", "card")
+    rep = client.get("/report", headers=h).json()
+    cr = rep["cards"]
+    c = cr["cards"][0]
+    assert (c["purchases"], c["refunds"], c["payments"], c["matched"], c["unmatched"], c["cash_payments"]) == \
+        ("21500.00", "2000.00", "40000.00", "35000.00", "5000.00", "5000.00")
+    assert c["matched_count"] == 1 and c["unmatched_count"] == 1
+    assert cr["unmatched_bank_total"] == "8000.00" and cr["unmatched_bank_payments"][0]["narration"] == "CC PAYMENT AXIS 4455"
+    assert cr["total_paid"] == "48000.00"   # 40,000 received on the card + 8,000 paid to a card not uploaded; the matched 35,000 counted once
+    assert rep["totals"]["outflow"] == "19800.00"  # purchases 21,500 + swiggy 300 - refund 2,000; payments never counted
+    dash = client.get("/dashboard", headers=h).json()
+    assert dash["card_payments"] == "48000.00" and dash["card_matched"] == 1 and dash["card_payment_count"] == 3
+    wb = load_workbook(io.BytesIO(client.get("/export.xlsx", headers=h).content))
+    assert "Credit cards" in wb.sheetnames
+    cells = [str(v) for row in wb["Credit cards"].iter_rows(values_only=True) for v in row if v is not None]
+    assert "CC PAYMENT AXIS 4455" in cells and 48000.0 in [v for row in wb["Credit cards"].iter_rows(values_only=True) for v in row]

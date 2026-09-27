@@ -1,5 +1,5 @@
 """FY working-paper summary, audit flags and XLSX export."""
-import io
+import io, re
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
@@ -47,7 +47,57 @@ def totals(rows) -> dict:
         else:
             inflow += t.credit
             outflow += t.debit
-    return {"inflow": inflow, "outflow": outflow - refunds, "refunds": refunds, "neutral": neutral}
+    card = sum((t.debit for t, _ in rows if t.category == "card_settlement"), Decimal())
+    return {"inflow": inflow, "outflow": outflow - refunds, "refunds": refunds, "neutral": neutral,
+            "card_payments": card, "self_transfers": neutral - card}
+
+
+CASH = re.compile(r"\bcash\b", re.I)
+
+
+def card_reconciliation(rows) -> dict:
+    """Per credit card: purchases (already counted as expenses), refunds and bill payments, with how many
+    payments were matched to a bank debit. Card bill payments are reported to the IT dept (AIS), so the
+    total paid is shown for the CA to compare. Each payment is counted once even when both legs exist."""
+    cards: dict[int, dict] = {}
+    for t, a in rows:
+        if a.kind != "card":
+            continue
+        c = cards.setdefault(a.id, {"account_id": a.id, "account": a.name, "purchases": Decimal(), "purchase_count": 0, "refunds": Decimal(),
+                                    "payments": Decimal(), "payment_count": 0, "matched": Decimal(), "matched_count": 0,
+                                    "unmatched": Decimal(), "unmatched_count": 0, "cash_payments": Decimal()})
+        if t.category == "card_settlement" and t.credit > 0:
+            c["payments"] += t.credit
+            c["payment_count"] += 1
+            if t.match_group:
+                c["matched"] += t.credit
+                c["matched_count"] += 1
+            else:
+                c["unmatched"] += t.credit
+                c["unmatched_count"] += 1
+            if CASH.search(t.narration):
+                c["cash_payments"] += t.credit
+        elif t.category == "refund_reversal" and t.credit > 0:
+            c["refunds"] += t.credit
+        elif t.debit > 0 and t.category not in NEUTRAL:
+            c["purchases"] += t.debit
+            c["purchase_count"] += 1
+    # Bill payments made from an uploaded bank account to a card whose statement isn't uploaded.
+    orphan = [(t, a) for t, a in rows if t.category == "card_settlement" and t.debit > 0 and a.kind == "bank" and not t.match_group]
+    orphan_total = sum((t.debit for t, _ in orphan), Decimal())
+    card_list = sorted(cards.values(), key=lambda c: c["account"].lower())
+    total_paid = sum((c["payments"] for c in card_list), Decimal()) + orphan_total
+    cash_total = sum((c["cash_payments"] for c in card_list), Decimal())
+    as_str = lambda d: {k: (str(v) if isinstance(v, Decimal) else v) for k, v in d.items()}
+    return {
+        "cards": [as_str(c) for c in card_list],
+        "unmatched_bank_payments": [{"id": t.id, "date": t.txn_date.isoformat(), "account": a.name, "narration": t.narration, "amount": str(t.debit)} for t, a in orphan],
+        "unmatched_bank_total": str(orphan_total),
+        "total_paid": str(total_paid),
+        "total_purchases": str(sum((c["purchases"] for c in card_list), Decimal())),
+        "cash_paid": str(cash_total),
+        "sft_reportable": total_paid >= 10 * LAKH or cash_total >= LAKH,
+    }
 
 
 def purpose_split(rows) -> dict:
@@ -155,7 +205,7 @@ def flags(rows, fy: str | None) -> list[dict]:
     elif cash_dep > 0:
         add("info", f"Cash deposits of {inr(cash_dep)}", "Below the ₹10 lakh SFT reporting threshold, but keep a note of the source.")
 
-    card_paid = sum((t.debit for t, a in rows if t.category == "card_settlement" and a.kind == "bank"), Decimal())
+    card_paid = Decimal(card_reconciliation(rows)["total_paid"])
     if card_paid >= 10 * LAKH:
         add("info", f"Credit card bills paid: {inr(card_paid)}", "Card bill payments of ₹10 lakh or more in a year are reported in AIS (SFT). Make sure your declared income supports this spend.")
 
@@ -212,14 +262,19 @@ def export_xlsx(db: Session, workspace_id: int, fy: str | None, account_id: int 
         ws.append([f"Only transactions marked {purpose}. Excluded: {split['personal' if purpose == 'business' else 'business']['count']} "
                    f"{'personal' if purpose == 'business' else 'business'} and {split['unknown']['count']} with no purpose yet."])
     ws.append([])
-    for label, key in [("Money in (excl. transfers & refunds)", "inflow"), ("Money out (net of refunds, excl. card bill payments & transfers)", "outflow"), ("Refunds / reversals", "refunds"), ("Neutral: card bill payments & self transfers", "neutral")]:
+    for label, key in [("Money in (excl. transfers & refunds)", "inflow"), ("Money out (net of refunds, excl. card bill payments & transfers)", "outflow"),
+                       ("Refunds / reversals", "refunds"), ("Credit card bill payments (not an expense — see 'Credit cards' sheet)", "card_payments"),
+                       ("Transfers between own accounts (not income or expense)", "self_transfers")]:
         ws.append([label, float(tot[key])])
     ws.append([])
     ws.append(["Category", "Group", "Count", "Debit (₹)", "Credit (₹)", "ITR note"])
     for c in ws[ws.max_row]:
         c.font, c.fill = bold, head_fill
     for r in category_summary(rows):
+        if r["group"] == "neutral":
+            continue  # card bill payments and self-transfers are listed above and reconciled on their own sheet
         ws.append([r["label"], r["group"].replace("_", " "), r["count"], float(r["debit"]), float(r["credit"]), r["itr_hint"]])
+    ws.append(["Credit card bill payments and transfers between own accounts are not income or expenses; see the lines above and the 'Credit cards' sheet."])
     for col, width in zip("ABCDEF", [48, 16, 8, 16, 16, 80]):
         ws.column_dimensions[col].width = width
 
@@ -246,6 +301,37 @@ def export_xlsx(db: Session, workspace_id: int, fy: str | None, account_id: int 
         ba.column_dimensions["A"].width = 44
         for i in range(2, len(accounts) + 3):
             ba.column_dimensions[ba.cell(row=1, column=i).column_letter].width = 20
+
+    cr = card_reconciliation(rows)
+    if cr["cards"] or cr["unmatched_bank_payments"]:
+        cc = wb.create_sheet("Credit cards")
+        cc.append(["Credit card reconciliation"])
+        cc["A1"].font = Font(bold=True, size=13)
+        cc.append(["Card purchases are already counted as expenses under their categories. Bill payments to the card only settle those purchases, "
+                   "so they are shown here for reconciliation and never counted as expenses."])
+        cc.append([])
+        cc.append(["Card", "Purchases (₹)", "No. of purchases", "Refunds (₹)", "Bill payments received (₹)", "Matched to a bank debit (₹)",
+                   "Matched (no.)", "Not matched (₹)", "Not matched (no.)", "Paid in cash (₹)"])
+        for c in cc[cc.max_row]:
+            c.font, c.fill = bold, head_fill
+        for c in cr["cards"]:
+            cc.append([c["account"], float(c["purchases"]), c["purchase_count"], float(c["refunds"]), float(c["payments"]), float(c["matched"]),
+                       c["matched_count"], float(c["unmatched"]), c["unmatched_count"], float(c["cash_payments"])])
+        cc.append([])
+        cc.append(["Total card bill payments this year (₹)", float(cr["total_paid"])])
+        cc[cc.max_row][0].font = bold
+        cc.append(["Compare with AIS → SFT 'Payment of credit card bills'. Issuers report payments of ₹10 lakh or more a year (₹1 lakh or more in cash)."])
+        if cr["unmatched_bank_payments"]:
+            cc.append([])
+            cc.append(["Paid from a bank account to a card whose statement isn't uploaded"])
+            cc[cc.max_row][0].font = bold
+            cc.append(["Date", "Bank account", "Narration", "Amount (₹)"])
+            for c in cc[cc.max_row]:
+                c.font, c.fill = bold, head_fill
+            for u in cr["unmatched_bank_payments"]:
+                cc.append([u["date"], u["account"], u["narration"], float(u["amount"])])
+        for col, width in zip("ABCDEFGHIJ", [38, 16, 12, 14, 18, 18, 12, 16, 12, 14]):
+            cc.column_dimensions[col].width = width
 
     fl = wb.create_sheet("Flags")
     fl.append(["Level", "Flag", "Detail"])

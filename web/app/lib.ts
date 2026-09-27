@@ -1,5 +1,5 @@
 export type Flag = { level: "warning" | "info"; title: string; detail: string };
-export type Dash = { income: string; expenses: string; refunds: string; neutral: string; transactions: number; exceptions: number; accounts: number; flags: Flag[] };
+export type Dash = { income: string; expenses: string; refunds: string; neutral: string; card_payments: string; self_transfers: string; card_matched: number; card_payment_count: number; transactions: number; exceptions: number; accounts: number; flags: Flag[] };
 export type Tx = {
   id: number; date: string; narration: string; debit: string; credit: string; balance: string | null;
   category: string; category_label: string; group: string; itr_hint: string; category_source: string; note: string | null;

@@ -171,3 +171,10 @@ select.purpose { padding: 6px 8px; font-size: 13px; }
 select.purpose.business { border-color: #3b6fb6; background: #eef3fb; }
 select.purpose.personal { border-color: #9a6a2f; background: #fbf5ec; }
 select.purpose.unknown { border-style: dashed; }
+.orphans { margin-top: 14px; padding: 12px 14px; background: var(--warn-bg); border-radius: 10px; }
+.orphans ul { margin: 6px 0; padding-left: 18px; line-height: 1.6; }
+.cardtotal { margin-top: 14px; display: grid; grid-template-columns: 1fr auto; gap: 4px 14px; align-items: baseline; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper); }
+.cardtotal strong { font-size: 20px; }
+.cardtotal small { grid-column: 1 / -1; color: var(--muted); line-height: 1.5; }
+.cardtotal.warn { border-color: #d08a3c; background: var(--warn-bg); }
+.small-note { font-size: 13px; margin: 12px 0 0; }

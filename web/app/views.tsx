@@ -71,7 +71,8 @@ export function Overview({ api, fy, version, refresh, go }: ViewProps) {
           <div className="metrics">
             <article><p>Money in</p><strong>{money(dash?.income)}</strong><small>Excludes self-transfers & refunds</small></article>
             <article><p>Money out</p><strong>{money(dash?.expenses)}</strong><small>Net of refunds; card bill payments excluded</small></article>
-            <article><p>Neutral flows</p><strong>{money(dash?.neutral)}</strong><small>Card bill payments & self-transfers</small></article>
+            <article className="clickable" onClick={() => go("report")}><p>Credit card bill payments</p><strong>{money(dash?.card_payments)}</strong>
+              <small>Not an expense{dash && dash.card_payment_count > 0 ? ` · ${dash.card_matched} of ${dash.card_payment_count} matched` : ""}{dash && Number(dash.self_transfers) ? ` · self-transfers ${money(dash.self_transfers)}` : ""}</small></article>
             <article className="clickable" onClick={() => go("transactions", "exceptions")}><p>Needs attention</p><strong>{dash?.exceptions ?? "—"}</strong><small>Click to review →</small></article>
           </div>
           <div className="split">
@@ -548,10 +549,54 @@ const GROUP_LABEL: Record<string, string> = { income: "Income", tax: "Tax paid",
 
 type AccountLine = { account_id: number; account: string; kind: string; count: number; inflow: string; outflow: string; refunds: string; neutral: string; exceptions: number; from: string; to: string };
 
+type CardLine = { account_id: number; account: string; purchases: string; purchase_count: number; refunds: string; payments: string; payment_count: number;
+  matched: string; matched_count: number; unmatched: string; unmatched_count: number; cash_payments: string };
+type CardRecon = { cards: CardLine[]; unmatched_bank_payments: { id: number; date: string; account: string; narration: string; amount: string }[];
+  unmatched_bank_total: string; total_paid: string; total_purchases: string; cash_paid: string; sft_reportable: boolean };
+
+function CreditCards({ data, go }: { data: CardRecon; go: (v: ViewId, filter?: string) => void }) {
+  if (!data.cards.length && !data.unmatched_bank_payments.length) return null;
+  return (
+    <section className="panel">
+      <div className="panelhead"><h2>Credit cards</h2><span>Bill payments are shown to reconcile, never as expenses</span></div>
+      <p className="muted">Card purchases are already counted in expenses under their categories. Paying the card bill only settles them, so it's matched to the bank debit here instead of being counted again.</p>
+      {data.cards.length > 0 && (
+        <div className="scroll"><table>
+          <thead><tr><th>Card</th><th className="num">Purchases</th><th className="num">Refunds</th><th className="num">Bill payments received</th><th>Matched to a bank debit</th><th>Not matched</th></tr></thead>
+          <tbody>{data.cards.map(c => (
+            <tr key={c.account_id}>
+              <td><b>{c.account}</b></td>
+              <td className="num nowrap">{money(c.purchases)}<small className="muted block">{c.purchase_count} purchases</small></td>
+              <td className="num nowrap">{Number(c.refunds) ? money(c.refunds) : "—"}</td>
+              <td className="num nowrap">{money(c.payments)}<small className="muted block">{c.payment_count} payments{Number(c.cash_payments) ? ` · ${money(c.cash_payments)} in cash` : ""}</small></td>
+              <td>{c.payment_count ? <><span className={`tag ${c.matched_count === c.payment_count ? "good" : ""}`}>{c.matched_count} of {c.payment_count}</span> <small className="muted">{money(c.matched)}</small></> : "—"}</td>
+              <td>{c.unmatched_count ? <small>{c.unmatched_count} · {money(c.unmatched)}<span className="muted block">Paid from an account that isn't uploaded (or in cash)</span></small> : <small className="pos">All matched</small>}</td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      )}
+      {data.unmatched_bank_payments.length > 0 && (
+        <div className="orphans">
+          <b>Paid to a card whose statement isn't uploaded: {money(data.unmatched_bank_total)}</b>
+          <ul>{data.unmatched_bank_payments.slice(0, 8).map(u => <li key={u.id}>{u.date} · {u.account} · {u.narration} · <b>{money(u.amount)}</b></li>)}</ul>
+          {data.unmatched_bank_payments.length > 8 && <small className="muted">and {data.unmatched_bank_payments.length - 8} more</small>}
+          <button className="link" onClick={() => go("upload")}>Upload those card statements so their purchases are counted →</button>
+        </div>
+      )}
+      <div className={`cardtotal ${data.sft_reportable ? "warn" : ""}`}>
+        <span>Total card bill payments this year</span><strong>{money(data.total_paid)}</strong>
+        <small>{data.sft_reportable
+          ? "At or above the reporting limit (₹10 lakh a year, or ₹1 lakh in cash): card issuers report this to the IT department. Your CA should match it with AIS → “Payment of credit card bills”."
+          : "Compare with AIS → “Payment of credit card bills” if it appears there. Issuers report ₹10 lakh or more a year (₹1 lakh or more in cash)."}</small>
+      </div>
+    </section>
+  );
+}
+
 type PurposeSplit = Record<"business" | "personal" | "unknown", { count: number; inflow: string; outflow: string }>;
 
 export function Report({ api, fy, version, go, businessMode }: ViewProps) {
-  const [data, setData] = useState<ReportData & { accounts: AccountLine[]; purpose_split: PurposeSplit }>();
+  const [data, setData] = useState<ReportData & { accounts: AccountLine[]; purpose_split: PurposeSplit; cards: CardRecon }>();
   const [accountId, setAccountId] = useState<string>("");
   const [scope, setScope] = useState<"" | "business" | "personal">("");
   useEffect(() => { if (!businessMode) setScope(""); }, [businessMode]);
@@ -562,7 +607,7 @@ export function Report({ api, fy, version, go, businessMode }: ViewProps) {
     if (fy) params.set("fy", fy);
     if (accountId) params.set("account_id", accountId);
     if (scope) params.set("purpose", scope);
-    api.get<ReportData & { accounts: AccountLine[]; purpose_split: PurposeSplit }>(`/report?${params}`).then(setData).catch(e => setError(e.message));
+    api.get<ReportData & { accounts: AccountLine[]; purpose_split: PurposeSplit; cards: CardRecon }>(`/report?${params}`).then(setData).catch(e => setError(e.message));
   }, [api, fy, version, accountId, scope]);
   const selected = data?.accounts.find(a => String(a.account_id) === accountId);
   const download = async () => {
@@ -596,7 +641,7 @@ export function Report({ api, fy, version, go, businessMode }: ViewProps) {
       {error && <p className="error">{error}</p>}
       <p className="explain">{selected
         ? <>Showing <b>{selected.account}</b> only ({selected.kind === "card" ? "credit card" : "bank"}, {selected.from} → {selected.to}). <button className="link inline" onClick={() => setAccountId("")}>Back to all accounts</button></>
-        : <>The Excel file has a Summary by category with ITR notes, a By account sheet (totals per account, plus a category × account table), the audit Flags, and every Transaction with its source file and row. It's a provisional working paper, not a tax computation. Use it alongside your Form 16, AIS and 26AS.</>}</p>
+        : <>The Excel file has a Summary by category with ITR notes, a By account sheet (totals per account, plus a category × account table), a Credit cards reconciliation, the audit Flags, and every Transaction with its source file and row. It's a provisional working paper, not a tax computation. Use it alongside your Form 16, AIS and 26AS.</>}</p>
       {data && (
         <>
           <div className="metrics three">
@@ -604,7 +649,7 @@ export function Report({ api, fy, version, go, businessMode }: ViewProps) {
             <article><p>{scope === "business" ? "Business expenses (net)" : "Money out (net)"}</p><strong>{money(data.totals.outflow)}</strong></article>
             {scope
               ? <article className="clickable" onClick={() => go("transactions", "purpose:unknown")}><p>Purpose not set</p><strong>{data.purpose_split.unknown.count}</strong><small>Excluded until you choose. Click to review →</small></article>
-              : <article><p>Neutral (excluded)</p><strong>{money(data.totals.neutral)}</strong></article>}
+              : <article><p>Card bill payments</p><strong>{money(data.cards.total_paid)}</strong><small>Not an expense · reconciled below{Number(data.totals.self_transfers) ? ` · self-transfers ${money(data.totals.self_transfers)}` : ""}</small></article>}
           </div>
           {businessMode && !scope && (
             <div className="metrics three">
@@ -636,11 +681,12 @@ export function Report({ api, fy, version, go, businessMode }: ViewProps) {
             <div className="panelhead"><h2>Audit findings</h2><span>{data.flags.length}</span></div>
             <Flags flags={data.flags} />
           </section>
+          {!scope && <CreditCards data={data.cards} go={go} />}
           <section className="panel">
             <div className="panelhead"><h2>By category{selected ? ` · ${selected.account}` : ""}</h2><span>Click a row to see its transactions</span></div>
             <div className="scroll"><table>
               <thead><tr><th>Category</th><th>Group</th><th className="num">Count</th><th className="num">Out</th><th className="num">In</th><th>ITR note</th></tr></thead>
-              <tbody>{data.categories.map(c => (
+              <tbody>{data.categories.filter(c => c.group !== "neutral").map(c => (
                 <tr key={c.category} className="clickable" onClick={() => go("transactions", `category:${c.category}`)}>
                   <td><b>{c.label}</b></td><td>{GROUP_LABEL[c.group] ?? c.group}</td><td className="num">{c.count}</td>
                   <td className="num nowrap">{Number(c.debit) ? money(c.debit) : "—"}</td><td className="num nowrap">{Number(c.credit) ? money(c.credit) : "—"}</td>
@@ -648,6 +694,7 @@ export function Report({ api, fy, version, go, businessMode }: ViewProps) {
                 </tr>
               ))}</tbody>
             </table></div>
+            {data.categories.some(c => c.group === "neutral") && <p className="muted small-note">Credit card bill payments and transfers between your own accounts aren't income or expenses, so they're not listed here. See <b>Credit cards</b> above and the <button className="link inline" onClick={() => go("reconciliation")}>Reconciliation</button> page.</p>}
           </section>
         </>
       )}

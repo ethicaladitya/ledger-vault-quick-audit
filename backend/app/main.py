@@ -12,7 +12,7 @@ from .security import hash_password, verify_password, token_for, current_user, c
 from .services.ingestion import import_file, import_path, MAX_FILE
 from .services.passwords import Hints
 from .services.reconciliation import reconcile, base_status
-from .services.report import fy_transactions, totals, category_summary, account_summary, flags, export_xlsx, purpose_flags, purpose_split
+from .services.report import fy_transactions, totals, category_summary, account_summary, flags, export_xlsx, purpose_flags, purpose_split, card_reconciliation
 from .services.rules import CATEGORIES, NEUTRAL, merchant_key, classify
 from . import migrate
 
@@ -364,7 +364,11 @@ def categories():
 def dashboard(fy: str | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)):
     rows = fy_transactions(db, user.workspace_id, fy)
     t = totals(rows)
+    cards = card_reconciliation(rows)
     return {"income": str(t["inflow"]), "expenses": str(t["outflow"]), "refunds": str(t["refunds"]), "neutral": str(t["neutral"]),
+            "card_payments": cards["total_paid"], "self_transfers": str(t["self_transfers"]),
+            "card_matched": sum(c["matched_count"] for c in cards["cards"]),
+            "card_payment_count": sum(c["payment_count"] for c in cards["cards"]) + len(cards["unmatched_bank_payments"]),
             "transactions": len(rows), "exceptions": sum(tx.status in {"needs_review", "unmatched", "ambiguous"} for tx, _ in rows),
             "accounts": len({a.id for _, a in rows}), "flags": flags(rows, fy)}
 
@@ -472,7 +476,7 @@ def report(fy: str | None = None, account_id: int | None = None, purpose: str | 
     return {"totals": {k: str(v) for k, v in t.items()}, "categories": category_summary(rows),
             "flags": purpose_flags(all_rows, purpose) + flags(rows, fy),
             "accounts": account_summary(fy_transactions(db, user.workspace_id, fy, None, purpose)),
-            "purpose_split": purpose_split(all_rows)}
+            "purpose_split": purpose_split(all_rows), "cards": card_reconciliation(rows)}
 
 
 @app.get("/export.xlsx")
