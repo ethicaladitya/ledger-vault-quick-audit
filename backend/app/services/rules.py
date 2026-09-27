@@ -28,6 +28,7 @@ CATEGORIES = {
     "medical": ("Medical / pharmacy", "expense", "Preventive health check-up → possible 80D"),
     "card_settlement": ("Credit card bill payment", "neutral", "Not an expense — the card purchases are counted instead"),
     "own_transfer": ("Transfer between own accounts", "neutral", "Not income or expense"),
+    "card_emi": ("Card EMI conversion / instalment", "neutral", "Repays a card purchase that is already counted once; not spending or tax again (interest/fees are charged separately)"),
     "cash_withdrawal": ("Cash withdrawal (ATM / UPI cash)", "expense", "Cash withdrawals > ₹1 crore/yr attract TDS u/s 194N"),
     "utilities": ("Utilities, phone & internet", "expense", ""),
     "dining": ("Food & dining", "expense", ""),
@@ -49,12 +50,13 @@ CATEGORIES = {
     "bank_transfer": ("NEFT / IMPS / RTGS (unidentified)", "review", "Identify the counter-party"),
     "uncategorized": ("Uncategorised", "review", "Needs a category"),
 }
-NEUTRAL = {"card_settlement", "own_transfer"}
+NEUTRAL = {"card_settlement", "own_transfer", "card_emi"}
+MATCHED = {"card_settlement", "own_transfer"}  # neutral flows that have a counterpart on another statement
 REVIEW = {c for c, (_, group, _) in CATEGORIES.items() if group == "review"}
 
 D, C, A = "debit", "credit", "any"
 # Bump when rules change: rows categorised by rules (not by the user) are re-classified on start-up.
-RULES_VERSION = 4
+RULES_VERSION = 5
 
 # Narration codes: HDFC ATW (own ATM) / NWD, EAW (other ATM), ICICI VPS/IPS (debit card), BIL (bill pay),
 # INF (linked-account transfer), MMT (IMPS), EBA (ICICI Direct), NFS (shared ATM network), ICCW (UPI cash
@@ -123,11 +125,19 @@ def merchant_key(narration: str) -> str:
     return " ".join(words[:3])
 
 
+CARD_EMI = re.compile(r"\bemi\b|smart ?emi|emi ?conv|flexi ?pay|easy ?emi|instal+ment|loan on card|\bemi[-/ ]", re.I)
+EMI_COSTS = re.compile(r"fee|charge|interest|\bint\b|gst|tax on|foreclos", re.I)
+
+
 def classify(narration: str, is_debit: bool = True, account_kind: str = "bank", user_rules: dict[str, str] | None = None) -> str:
     if user_rules:
         learned = user_rules.get(merchant_key(narration))
         if learned:
             return learned
+    # On a credit card, "EMI ..." rows convert an existing purchase into instalments (credit) or repay it
+    # (debit). The purchase itself is already counted, so these are neutral; EMI interest/fees are charges.
+    if account_kind == "card" and CARD_EMI.search(narration):
+        return "bank_charges" if EMI_COSTS.search(narration) else "card_emi"
     # On a card statement, a credit that looks like a payment is the other leg of the bank's bill payment.
     if account_kind == "card" and not is_debit:
         if _CARD_PAYMENT_CREDIT.search(narration) and not re.search(r"refund|reversal|cashback", narration, re.I):

@@ -151,3 +151,34 @@ def test_clean_line_keeps_markers():
     assert clean_line("02/12/2025 X (cid:3)10.00(cid:7)") == "02/12/2025 X 10.00"
     assert clean_line("02/12/2025 X 10.00l") == "02/12/2025 X 10.00"
     assert clean_line("02/12/2025 X 10.00Cr") == "02/12/2025 X 10.00Cr"
+
+
+def test_card_emi_on_tax_paid_by_card_counts_once(client):
+    from tests.conftest import signup
+    from tests.pdf_fixtures import _text_pdf
+    from app.services.pdf import clean_line
+    assert clean_line("13/03/2026| 00:00 EMI CBDTGURGAON ₹ 50,425.00 +") == "13/03/2026 00:00 EMI CBDTGURGAON 50,425.00 Cr"
+    h = signup(client)
+    stmt = _text_pdf([
+        "Tata Neu Infinity HDFC Bank Credit Card Statement",
+        "Credit Card No. 4854XXXXXXXXXX45   Total Amount Due   Minimum Amount Due   Credit Limit",
+        "DATE & TIME   TRANSACTION DESCRIPTION   Base NeuCoins*   AMOUNT   PI",
+        "13/03/2026| 11:02   CBDTGURGAON - 1344                    Rs. 50,425.00 l",
+        "13/03/2026| 00:00   EMI CBDTGURGAON                       Rs. 50,425.00 +",
+        "15/03/2026| 00:00   EMI CBDTGURGAON                       Rs. 9,076.00",
+        "15/03/2026| 00:00   EMI PROCESSING FEE CBDTGURGAON        Rs. 199.00",
+        "16/03/2026| 20:10   SWIGGY BANGALORE                      Rs. 450.00 l",
+    ])
+    r = client.post("/imports/upload", headers=h, data={"account_name": "", "kind": "auto"},
+                    files=[("files", ("4854XXXXXXXXXX45_19-03-2026_964.pdf", stmt, "application/pdf"))]).json()
+    assert r["files"][0]["transactions"] == 5, r
+    by = {(t["narration"], t["debit"], t["credit"]): t for t in client.get("/transactions", headers=h).json()["items"]}
+    assert by[("CBDTGURGAON - 1344", "50425.00", "0.00")]["category"] == "tax_payment"
+    assert by[("EMI CBDTGURGAON", "0.00", "50425.00")]["category"] == "card_emi"       # conversion credit, read from the trailing "+"
+    assert by[("EMI CBDTGURGAON", "9076.00", "0.00")]["category"] == "card_emi"        # instalment
+    assert by[("EMI PROCESSING FEE CBDTGURGAON", "199.00", "0.00")]["category"] == "bank_charges"
+    rep = client.get("/report", headers=h).json()
+    tax = next(c for c in rep["categories"] if c["category"] == "tax_payment")
+    assert tax["debit"] == "50425.00" and tax["count"] == 1
+    assert rep["totals"]["outflow"] == "51074.00"    # tax 50,425 + fee 199 + swiggy 450; EMI rows not spending again
+    assert all(t["status"] == "ok" for t in client.get("/transactions?category=card_emi", headers=h).json()["items"])

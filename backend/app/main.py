@@ -13,7 +13,7 @@ from .services.ingestion import import_file, import_path, MAX_FILE
 from .services.passwords import Hints
 from .services.reconciliation import reconcile, base_status
 from .services.report import fy_transactions, totals, category_summary, account_summary, flags, export_xlsx, purpose_flags, purpose_split, card_reconciliation
-from .services.rules import CATEGORIES, NEUTRAL, merchant_key, classify
+from .services.rules import CATEGORIES, MATCHED, NEUTRAL, merchant_key, classify
 from . import migrate
 
 # Registration is open only until the first account exists, unless explicitly enabled.
@@ -457,7 +457,7 @@ def update_transaction(tx_id: int, body: TxUpdate, db: Session = Depends(get_db)
 
 @app.get("/reconciliation")
 def reconciliation(fy: str | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    rows = [(t, a) for t, a in fy_transactions(db, user.workspace_id, fy) if t.category in NEUTRAL or t.match_group]
+    rows = [(t, a) for t, a in fy_transactions(db, user.workspace_id, fy) if t.category in MATCHED or t.match_group]
     groups: dict[str, list] = {}
     for t, a in rows:
         if t.match_group:

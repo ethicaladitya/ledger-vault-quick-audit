@@ -49,7 +49,8 @@ def totals(rows) -> dict:
             outflow += t.debit
     card = sum((t.debit for t, _ in rows if t.category == "card_settlement"), Decimal())
     return {"inflow": inflow, "outflow": outflow - refunds, "refunds": refunds, "neutral": neutral,
-            "card_payments": card, "self_transfers": neutral - card}
+            "card_payments": card, "self_transfers": sum((t.debit for t, _ in rows if t.category == "own_transfer"), Decimal()),
+            "card_emi": sum((t.debit for t, _ in rows if t.category == "card_emi"), Decimal())}
 
 
 CASH = re.compile(r"\bcash\b", re.I)

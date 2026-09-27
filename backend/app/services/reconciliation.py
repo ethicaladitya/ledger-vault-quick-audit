@@ -9,15 +9,17 @@ Statuses: ok | needs_review | unmatched | ambiguous | confirmed_settlement | con
 from uuid import uuid4
 from sqlalchemy.orm import Session
 from ..models import Transaction, FinancialAccount, AuditEvent
-from .rules import NEUTRAL, REVIEW
+from .rules import MATCHED, NEUTRAL, REVIEW
 from .purpose import apply_purposes
 
 WINDOWS = {"card_settlement": (-2, 7), "own_transfer": (-1, 3)}
 
 
 def base_status(t: Transaction) -> str:
-    if t.category in NEUTRAL:
+    if t.category in MATCHED:
         return "unmatched"
+    if t.category in NEUTRAL:
+        return "ok"
     if t.category in REVIEW and t.category_source != "user":
         return "needs_review"
     return "ok"
