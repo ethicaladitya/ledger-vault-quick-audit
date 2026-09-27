@@ -56,10 +56,10 @@ export function Overview({ api, fy, version, refresh, go }: ViewProps) {
         <section className="panel onboarding">
           <h2>Start by uploading your statements</h2>
           <ol>
-            <li><b>Download statements from net banking</b> for the financial year (April–March) as <b>Excel (XLS/XLSX) or CSV</b>. PDF isn't supported yet.</li>
-            <li><b>Upload each account separately</b>: give it a name like “HDFC Savings” and choose bank account or credit card.</li>
-            <li><b>Upload your credit-card statements too.</b> Card bill payments from your bank then cancel out, and the actual purchases are counted.</li>
-            <li><b>Review</b> anything flagged, then download the Excel working paper for your CA.</li>
+            <li><b>Collect a full financial year</b> (April–March) of statements for every bank account and credit card: e-statement PDFs, or Excel/CSV from net banking.</li>
+            <li><b>Drop them all in at once.</b> Each file is recognised as a bank account or card and filed automatically. For locked PDFs, enter your name, date of birth and PAN once, and the usual bank passwords are tried for you.</li>
+            <li><b>Include your credit-card statements.</b> Card bill payments from your bank are then matched to the card, and only the actual purchases count as spending.</li>
+            <li><b>Confirm the review</b>, clear anything flagged, then download the Excel working paper for your CA.</li>
           </ol>
           <div className="actions">
             <button onClick={() => go("upload")}>Upload statements</button>
