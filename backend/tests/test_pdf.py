@@ -196,3 +196,28 @@ def test_hdfc_rupee_glyph_credits_and_descriptions_above_the_date_line():
         ("UBER INDIA SYSTEMS BANGALORE", Decimal("312.40"), 0),
         ("REFUND AMAZON PAY", 0, Decimal("1299.00")),
     ]
+
+
+def test_card_totals_check_catches_a_payment_read_as_a_purchase():
+    from app.services.pdf import card_totals_check
+    text = ("HDFC Bank Credit Card Statement\nPrevious Balance 10,000.00  Payments/Credits 10,000.00  Purchases/Debits 3,850.00\n"
+            "Total Amount Due 3,850.00  Minimum Amount Due 200.00\n")
+    row = lambda d, c: {"debit": Decimal(d), "credit": Decimal(c)}
+    right = [row("450.00", "0"), row("3400.00", "0"), row("0", "10000.00")]
+    wrong = [row("450.00", "0"), row("3400.00", "0"), row("10000.00", "0")]   # the old HDFC misread
+    dropped = right[1:]
+    assert card_totals_check(text, right) is True
+    assert card_totals_check(text, wrong) is False
+    assert card_totals_check(text, dropped) is False
+    assert card_totals_check("Credit Card Statement\n", right) is None
+
+
+def test_card_totals_check_warns_on_import():
+    from tests.pdf_fixtures import _text_pdf
+    head = ["HDFC Bank Credit Card Statement  Card No: 6529 XXXX XXXX 1047",
+            "Previous Balance 5,000.00   Total Amount Due 1,700.00   Minimum Amount Due 100.00   Credit Limit 1,00,000.00",
+            "Date Transaction Description Amount", "02/10/2025 ZOMATO GURGAON 1,700.00"]
+    _, _, warnings = parse(_text_pdf(head + ["05/10/2025 PAYMENT RECEIVED NETBANKING 5,000.00"]))  # no Cr marker: read as a purchase
+    assert any(w.startswith("Doesn't add up") for w in warnings)
+    _, _, warnings = parse(_text_pdf(head + ["05/10/2025 PAYMENT RECEIVED NETBANKING 5,000.00 Cr"]))
+    assert not any(w.startswith("Doesn't add up") for w in warnings)

@@ -268,6 +268,22 @@ def _renumber(rows: list[dict]) -> list[dict]:
     return rows
 
 
+def card_totals_check(text: str, rows: list[dict]) -> bool | None:
+    """Does previous balance + purchases − payments/credits = total due, for amounts printed outside the
+    transaction lines? True if some pair fits, False if none does, None if the statement prints no summary
+    amounts. A payment read as a purchase (or a dropped row) breaks the equation, so this catches what
+    a layout change does silently."""
+    debits = sum((r["debit"] for r in rows), Decimal())
+    credits = sum((r["credit"] for r in rows), Decimal())
+    summary = [clean_line(l) for l in text.splitlines() if l.strip() and not re.match(rf"\s*{DATE}", l.strip(), re.I)]
+    amounts = {abs(_amt(a)) for line in summary for _, a, _ in AMOUNT_TAIL.findall(line)}
+    if not amounts:
+        return None
+    tol = Decimal("1.00")
+    return any(abs(prev + debits - credits - due) <= tol or abs(prev + debits - credits + due) <= tol  # a credit balance prints as due
+               for prev in amounts | {Decimal()} for due in amounts)
+
+
 def parse_pdf(content: PdfContent, kind: str, warnings: list[str], diagnostics: dict | None = None) -> list[dict]:
     """Try each extraction method and keep the one that finds the most transactions."""
     attempts = []
@@ -294,4 +310,13 @@ def parse_pdf(content: PdfContent, kind: str, warnings: list[str], diagnostics: 
             warnings.append(x)
     if "tables" not in name:
         warnings.append("Read from PDF text — compare the imported total with your statement.")
+    if kind == "card":
+        check = card_totals_check(content.text, rows)
+        if diagnostics is not None:
+            diagnostics["totals_check"] = check
+        if check is False:
+            debits, credits = sum((r["debit"] for r in rows), Decimal()), sum((r["credit"] for r in rows), Decimal())
+            warnings.append(f"Doesn't add up: purchases of {debits:,.2f} and payments/credits of {credits:,.2f} read from this statement don't "
+                            "reconcile with its previous balance and total due. Some rows may be missing or have the wrong debit/credit "
+                            "sign; check this statement before relying on it.")
     return _renumber(rows)
