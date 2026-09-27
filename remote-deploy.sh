@@ -5,7 +5,7 @@ set -euo pipefail
 #
 #   ./remote-deploy.sh user@host /path/to/ledgervault/on/server [ssh-key]
 #
-# Copies the code with rsync (never .env, keys, node_modules or local data), then
+# Copies the files tracked by git with rsync (never .env, keys or local data), then
 # runs ./deploy.sh on the server. The remote folder must already contain the
 # .env created by setup.sh, so this can never start a second, empty stack.
 # For a brand-new server, copy the repo there and run ./setup.sh instead.
@@ -17,6 +17,10 @@ target="$1"; remote_dir="$2"; key="${3:-}"
 ssh_cmd=(ssh -o StrictHostKeyChecking=accept-new)
 [[ -n "$key" ]] && ssh_cmd+=(-i "$key")
 cd "$(dirname "${BASH_SOURCE[0]}")"
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  echo "You have uncommitted changes to tracked files; commit or stash them first so the server gets exactly this branch." >&2
+  exit 1
+fi
 
 if ! "${ssh_cmd[@]}" "$target" "test -f '$remote_dir/.env'"; then
   echo "No .env in $target:$remote_dir — is that the folder the app runs from?" >&2
@@ -29,9 +33,7 @@ if ! "${ssh_cmd[@]}" "$target" "grep -qE '^SITE_ADDRESS=.+' '$remote_dir/.env'";
   exit 1
 fi
 
-rsync -az --delete -e "${ssh_cmd[*]}" \
-  --exclude '.git/' --exclude '.env' --exclude '.env.*' --exclude '*.pem' --exclude '*.key' \
-  --exclude 'node_modules/' --exclude '.next/' --exclude '__pycache__/' --exclude '*.db' \
-  --exclude 'private/' --exclude 'statements/' \
-  ./ "$target:$remote_dir/"
+# Only files tracked by git are sent, so personal files that happen to sit in this
+# folder (statements, tax PDFs, .env, keys) never leave your machine.
+git ls-files -z | rsync -az --from0 --files-from=- -e "${ssh_cmd[*]}" ./ "$target:$remote_dir/"
 "${ssh_cmd[@]}" "$target" "cd '$remote_dir' && ./deploy.sh"
