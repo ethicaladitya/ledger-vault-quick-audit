@@ -245,3 +245,53 @@ def test_card_totals_check_warns_on_import():
     assert any(w.startswith("Doesn't add up") for w in warnings)
     _, _, warnings = parse(_text_pdf(head + ["05/10/2025 PAYMENT RECEIVED NETBANKING 5,000.00 Cr"]))
     assert not any(w.startswith("Doesn't add up") for w in warnings)
+
+
+def test_bank_rows_missing_from_the_middle_are_reported():
+    from tests.pdf_fixtures import hdfc_year_statement
+    _, rows, warnings = parse(hdfc_year_statement())
+    assert len(rows) == 36 and not any("Running balance breaks" in w for w in warnings)
+    from app.services.ingestion import parse_statement
+    rows, warnings = parse_statement("hdfc.pdf", hdfc_year_statement(skip_months={5, 6, 7, 8, 9}), "bank")
+    assert len(rows) == 21
+    gap = [w for w in warnings if w.startswith("Running balance breaks in 1 place(s)")]
+    assert gap and "21 Apr 2025 → 03 Oct 2025" in gap[0]
+
+
+def test_newest_first_bank_statement_is_not_a_gap():
+    from app.services.pdf import balance_gaps
+    rows = [{"date": date(2025, 4, d), "debit": Decimal("10.00"), "credit": Decimal("0"), "balance": b}
+            for d, b in [(3, Decimal("70.00")), (2, Decimal("80.00")), (1, Decimal("90.00"))]]
+    assert balance_gaps(rows) == []
+    rows[1]["balance"] = Decimal("85.00")
+    assert len(balance_gaps(rows)) == 2
+
+
+def test_bank_reading_whose_balance_carries_through_wins():
+    """Two readings with the same number of rows: the ruled table misreads a balance, the text lines don't."""
+    lines = ["Date Narration Withdrawal Amt. Deposit Amt. Closing Balance"]
+    table = [["Date", "Narration", "Withdrawal Amt.", "Deposit Amt.", "Closing Balance"]]
+    bal = Decimal("1000.00")
+    for d in range(1, 6):
+        bal -= Decimal("100.00")
+        lines.append(f"0{d}/04/2025 SHOP {d} 100.00 {bal:,.2f}")
+        table.append([f"0{d}/04/2025", f"SHOP {d}", "100.00", "", f"{bal + (50 if d == 3 else 0):,.2f}"])
+    content = PdfContent(text="\n".join(lines), tables=[table])
+    warnings, diag = [], {}
+    rows = parse_pdf(content, "bank", warnings, diag)
+    assert diag["used"] == "text lines" and [r["balance"] for r in rows][-1] == Decimal("500.00")
+
+
+def test_partly_read_statement_is_flagged_in_audit_and_coverage(client):
+    from tests.pdf_fixtures import hdfc_year_statement
+    h = signup(client)
+    res = upload(client, h, [("hdfc.pdf", hdfc_year_statement(skip_months={5, 6, 7, 8, 9}))])
+    assert res["files"][0]["transactions"] == 21
+    flags = client.get("/report?fy=2025-26", headers=h).json()["flags"]
+    titles = [f["title"] for f in flags]
+    assert "HDFC Bank Account ••6153: no transactions read for May, Jun, Jul, Aug, Sep" in titles
+    assert not any("no transactions in" in t for t in titles)  # not called a missing statement: it is uploaded
+    cov = client.get("/coverage?fy=2025-26", headers=h).json()["accounts"][0]["months"]
+    assert cov["2025-06"]["status"] == "warn" and cov["2025-06"]["statements"][0]["problem"].startswith("No rows were read")
+    assert cov["2025-04"]["status"] == "warn"  # the file's own warning: its balance breaks
+    assert cov["2026-03"]["status"] == "warn"

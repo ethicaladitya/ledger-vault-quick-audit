@@ -199,7 +199,7 @@ def parse_lines(text: str, kind: str, warnings: list[str], loose: bool = False) 
     from .ingestion import parse_date
     opening = re.search(rf"opening balance[^\d-]{{0,40}}({AMOUNT})", text, re.I)
     prev_balance = _amt(opening.group(1)) if opening else None
-    rows, guessed, broken, extra_lines = [], 0, 0, 0
+    rows, guessed, extra_lines = [], 0, 0
     for n, raw in enumerate(_joined_lines(text) if loose else text.splitlines(), start=1):
         line = clean_line(raw)
         m = LINE.match(line)
@@ -252,8 +252,6 @@ def parse_lines(text: str, kind: str, warnings: list[str], loose: bool = False) 
                     is_credit = bool(CREDIT_HINT.search(narration))
                     guessed += 1
                 debit, credit = (Decimal("0"), amount) if is_credit else (amount, Decimal("0"))
-            if prev_balance is not None and abs(prev_balance - debit + credit - balance) > Decimal("0.02"):
-                broken += 1
             prev_balance = balance
         else:
             amount, marker = amts[-1]
@@ -275,8 +273,6 @@ def parse_lines(text: str, kind: str, warnings: list[str], loose: bool = False) 
         r["narration"] = r["narration"].strip() or "(no narration)"
     if guessed:
         warnings.append(f"Debit/credit was inferred from the narration for {guessed} row(s) — spot-check them.")
-    if broken:
-        warnings.append(f"{broken} row(s) don't follow the running balance; some lines may have been misread. Compare totals with the PDF.")
     return rows
 
 
@@ -349,6 +345,27 @@ def statement_due(text: str, rows: list[dict]) -> Decimal | None:
     return dues.pop() if len(dues) == 1 else None
 
 
+def balance_gaps(rows: list[dict]) -> list[tuple]:
+    """Bank statements: (date before, date after) wherever the running balance doesn't carry from one row to the
+    next, i.e. rows are missing or misread there. Statements printed newest-first are checked in that order."""
+    rows = [r for r in rows if r.get("balance") is not None]
+    tol = Decimal("0.02")
+
+    def breaks(seq):
+        return [(a["date"], b["date"]) for a, b in zip(seq, seq[1:]) if abs(a["balance"] - b["debit"] + b["credit"] - b["balance"]) > tol]
+    forward = breaks(rows)
+    if not forward:
+        return []
+    backward = [(b, a) for a, b in breaks(rows[::-1])][::-1]
+    return backward if len(backward) < len(forward) else forward
+
+
+def gap_warning(gaps: list[tuple]) -> str:
+    spans = "; ".join(f"{a.strftime('%d %b %Y')} → {b.strftime('%d %b %Y')}" for a, b in gaps[:5]) + ("…" if len(gaps) > 5 else "")
+    return (f"Running balance breaks in {len(gaps)} place(s): {spans}. Rows are probably missing or misread there; "
+            "compare those dates with the statement before relying on this import.")
+
+
 def parse_pdf(content: PdfContent, kind: str, warnings: list[str], diagnostics: dict | None = None) -> list[dict]:
     """Try each extraction method and keep the best reading.
 
@@ -375,6 +392,15 @@ def parse_pdf(content: PdfContent, kind: str, warnings: list[str], diagnostics: 
     strict = max((a for a in attempts if "loose" not in a[1]), key=lambda a: a[0])  # ties keep the earliest
     adds_up = [a for a in attempts if a[4] is True]
     best = max(adds_up, key=lambda a: a[0]) if adds_up else strict if strict[0] >= 2 else max(attempts, key=lambda a: a[0])
+    if kind == "bank" and best[0] >= 2:
+        gaps = {a[1]: len(balance_gaps(a[2])) for a in attempts}
+        if gaps[best[1]]:
+            # Misread or glued-on rows break the balance chain. A reading of about as many rows whose balances carry
+            # through from row to row is the more faithful one.
+            near = [a for a in attempts if a[0] >= 0.9 * best[0]]
+            cleaner = min(near, key=lambda a: (gaps[a[1]], -a[0]))
+            if gaps[cleaner[1]] < gaps[best[1]]:
+                best = cleaner
     n, name, rows, w, check = best
     if diagnostics is not None:
         diagnostics.update({a[1]: a[0] for a in attempts})
