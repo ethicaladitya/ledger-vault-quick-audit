@@ -81,6 +81,47 @@ def test_workspaces_are_isolated(client):
         assert client.get(path).status_code == 401
 
 
+def test_new_user_cannot_see_or_touch_another_workspace(client):
+    """With registration open, a stranger's account must not reveal or change anything of the owner's."""
+    owner = signup(client, "owner@example.com")
+    upload(client, owner, [("owner-secret.csv", BANK.replace("UPI-RAMESH", "UPI-OWNERSECRET"))], "Owner Savings")
+    upload(client, owner, [("owner-card.csv", CARD)], "Owner Card", "card")
+    acc = client.get("/accounts", headers=owner).json()[0]["id"]
+    docs = [d["id"] for d in client.get("/documents", headers=owner).json()]
+    txs = [t["id"] for t in client.get("/transactions", headers=owner).json()["items"]]
+
+    stranger = signup(client, "stranger@example.com")
+    ids = ",".join(map(str, docs))
+    reads = ["/accounts", "/documents", "/years", "/dashboard", "/dashboard?fy=2025-26", "/transactions", "/transactions?q=OWNERSECRET",
+             f"/transactions?account_id={acc}", "/reconciliation", "/report?fy=2025-26", f"/report?fy=2025-26&account_id={acc}",
+             "/books?fy=2025-26", f"/books?account_id={acc}", "/coverage?fy=2025-26", f"/imports/review?docs={ids}", "/settings"]
+    for path in reads:
+        r = client.get(path, headers=stranger)
+        assert r.status_code == 200, path
+        body = r.text
+        for secret in ("OWNERSECRET", "Owner Savings", "Owner Card", "owner-secret.csv", "35000", "1200"):
+            assert secret not in body, f"{path} leaked {secret}"
+    assert client.get("/transactions", headers=stranger).json()["total"] == 0
+    assert client.get("/imports/review", params={"docs": ids}, headers=stranger).json() == {"statements": [], "groups": []}
+    x = client.get(f"/export.xlsx?account_id={acc}", headers=stranger)
+    assert x.status_code == 200 and b"OWNERSECRET" not in x.content and b"Owner" not in x.content
+
+    # Writes aimed at the owner's IDs are refused or change nothing.
+    assert client.patch(f"/accounts/{acc}", headers=stranger, json={"name": "hijacked"}).status_code == 404
+    assert all(client.patch(f"/transactions/{t}", headers=stranger, json={"category": "rent"}).status_code == 404 for t in txs)
+    assert all(client.delete(f"/documents/{d}", headers=stranger).status_code == 404 for d in docs)
+    r = client.post("/imports/confirm", headers=stranger, json={"groups": [{"tx_ids": txs, "category": "rent"}]})
+    assert r.status_code == 200 and r.json()["updated"] == 0
+    client.patch("/settings", headers=stranger, json={"business_mode": True})
+    assert client.get("/settings", headers=owner).json()["business_mode"] is False
+
+    # The owner's data is untouched.
+    mine = client.get("/transactions", headers=owner).json()["items"]
+    assert len(mine) == len(txs) and not any(t["category"] == "rent" for t in mine)
+    assert client.get("/accounts", headers=owner).json()[0]["name"] != "hijacked"
+    assert len(client.get("/documents", headers=owner).json()) == len(docs)
+
+
 def test_registration_closes_after_first_user(client, monkeypatch):
     from app import main
     monkeypatch.setattr(main, "ALLOW_REGISTRATION", False)
