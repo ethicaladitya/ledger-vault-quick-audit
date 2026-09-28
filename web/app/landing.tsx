@@ -47,7 +47,7 @@ const SECURITY = [
   { title: "No third-party AI, no tracking", body: "Categorisation is deterministic and explainable. No analytics, no telemetry, no external calls." },
   { title: "Passwords never stored", body: "Your name, date of birth and PAN are used in memory to open PDFs, then discarded." },
   { title: "Evidence you can audit", body: "Each file is fingerprinted, and each transaction keeps its source file and row number." },
-  { title: "Locked down by default", body: "Only the first account can register. Sign-in is rate-limited, passwords are hashed with scrypt, and traffic is served over HTTPS." },
+  { title: "Locked down by default", body: "Each account gets its own workspace, and the owner can close sign-up at any time. Sign-in is rate-limited, passwords are hashed with scrypt, and traffic is served over HTTPS." },
   { title: "Isolated workspaces", body: "Every page and API call is scoped to your own workspace, and tested for it." },
 ];
 
