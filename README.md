@@ -221,7 +221,7 @@ cd web && npm install && API_URL=http://localhost:8000 npm run dev
 cd backend && pytest -q
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the data model, matching rules and security model.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the data model, matching rules and security model. Coding agents: start with [AGENTS.md](AGENTS.md).
 
 ## Roadmap
 
