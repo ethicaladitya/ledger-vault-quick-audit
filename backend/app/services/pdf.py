@@ -6,12 +6,14 @@ amounts. For bank statements the running balance decides whether a row is a
 debit or a credit, and a broken balance chain is reported as a warning.
 """
 import io, re
+from datetime import datetime
 from dataclasses import dataclass, field
 from decimal import Decimal
 from .passwords import Hints, candidates
 
 CARD_MARKERS = ["minimum amount due", "min amt due", "minimum due", "total amount due", "total dues", "payment due date",
-                "credit limit", "available credit", "cash limit", "credit card statement", "card statement", "reward points"]
+                "credit limit", "available credit", "cash limit", "credit card statement", "card statement", "reward points",
+                "minimum payment due", "credit summary", "membership rewards"]
 BANK_MARKERS = ["opening balance", "closing balance", "ifsc", "statement of account", "account statement", "savings account",
                 "current account", "a/c no", "account no", "account number", "branch", "micr"]
 INSTITUTIONS = [
@@ -91,11 +93,40 @@ def read_pdf(data: bytes) -> PdfContent:
                 content.text_tables += [t for t in page.extract_tables({"vertical_strategy": "text", "horizontal_strategy": "text"}) if t]
             except Exception:
                 pass
-    content.text = "\n".join(texts)
-    content.layout_text = "\n".join(layouts)
+    content.text = add_years("\n".join(texts))
+    content.layout_text = add_years("\n".join(layouts))
     if len(re.sub(r"\s", "", content.text)) < 40:
         raise PdfError("This looks like a scanned image PDF. Scanned statements aren't supported yet; download the e-statement or Excel version instead.")
     return content
+
+
+MONTH_NAME = r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+YEARLESS = re.compile(rf"^(\s*)({MONTH_NAME})\.?\s+(\d{{1,2}})(?![\d:/.-])(?!,?\s*\d{{4}})", re.I | re.M)
+STATEMENT_DATE = re.compile(rf"(?:\bat|statement\s*date|statement\s*period|closing\s*date|\bto)\s*:?\s*({DATE})", re.I)
+
+
+def add_years(text: str) -> str:
+    """Some issuers (American Express) print transaction dates without a year: "October 29". Rewrite them as
+    "29 Oct 2025", taking the year from the statement date: a month after the statement's month belongs to the
+    year before (a January statement lists December purchases)."""
+    from .ingestion import parse_date
+    if len(YEARLESS.findall(text)) < 2:
+        return text
+    # The statement date ("At November 14, 2025", "... to November 14, 2025"), else the latest full date printed.
+    labelled = [d for m in STATEMENT_DATE.finditer(text) if (d := parse_date(m.group(1)))]
+    known = labelled or [d for m in re.finditer(DATE, text, re.I) if (d := parse_date(m.group(0)))]
+    if not known:
+        return text
+    ref = max(known)
+
+    def fill(m):
+        month = datetime.strptime(m.group(2)[:3].title(), "%b").month
+        day = int(m.group(3))
+        if not 1 <= day <= 31:
+            return m.group(0)
+        year = ref.year if month <= ref.month else ref.year - 1
+        return f"{m.group(1)}{day:02d} {m.group(2)[:3].title()} {year}"
+    return YEARLESS.sub(fill, text)
 
 
 def detect(text: str) -> dict:
@@ -112,6 +143,8 @@ def detect(text: str) -> dict:
         m = re.search(r"(?:\d{4}|[x*•]{4})[ -]?(?:[\dx*•]{2,4})[ -]?[x*•]{2,4}[ -]?[x*•]{0,4}[ -]?(\d{4})\b", low)
         # Some issuers (ICICI) print only the last 2 digits: 4854XXXXXXXXXX45
         m = m or re.search(r"\b\d{4}[x*•]{6,12}(\d{2,4})\b", low)
+        # American Express (15 digits, 4-6-5): XXXX-XXXXXX-91008
+        m = m or re.search(r"[x*•\d]{4}[ -][x*•]{6}[ -]\d?(\d{4})\b", low)
         last4 = m.group(1) if m else None
     else:
         m = re.search(r"(?:a/?c|account)\s*(?:no|number|num)?\.?\s*:?\s*([x*\d]{6,20})", low)
@@ -205,6 +238,12 @@ def parse_lines(text: str, kind: str, warnings: list[str], loose: bool = False) 
         m = LINE.match(line)
         m = (m.group(1), m.group(2), m.group(3)) if m else _loose_match(line) if loose else None
         if not m:
+            # American Express prints a payment's "CR" on the line below its amount (beside the card number).
+            if rows and extra_lines < 2 and kind == "card" and not rows[-1]["_marked"] and re.search(r"(?:^|\s)cr\.?$", line, re.I) \
+                    and not re.search(AMOUNT, line):
+                rows[-1]["debit"], rows[-1]["credit"], rows[-1]["_marked"] = Decimal("0"), rows[-1]["debit"], True
+                extra_lines += 1
+                continue
             # Wrapped narration: a short text-only line right after a transaction.
             if rows and extra_lines < 2 and line and not re.search(AMOUNT, line) and not re.match(DATE, line) \
                     and len(line) < 80 and not re.search(r"page|statement|balance|total|continued", line, re.I):
@@ -267,9 +306,10 @@ def parse_lines(text: str, kind: str, warnings: list[str], loose: bool = False) 
                 guessed += 1
         if debit == 0 and credit == 0:
             continue
-        rows.append({"source_row": n, "date": d, "narration": narration, "debit": debit, "credit": credit, "balance": balance, "_wrapped": []})
+        rows.append({"source_row": n, "date": d, "narration": narration, "debit": debit, "credit": credit, "balance": balance, "_wrapped": [],
+                     "_marked": kind == "bank" or bool(amts[-1][1])})
     for r in rows:
-        del r["_wrapped"]
+        del r["_wrapped"], r["_marked"]
         r["narration"] = r["narration"].strip() or "(no narration)"
     if guessed:
         warnings.append(f"Debit/credit was inferred from the narration for {guessed} row(s) — spot-check them.")

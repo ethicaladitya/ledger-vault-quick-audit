@@ -167,3 +167,45 @@ def hdfc_year_statement(skip_months=()) -> bytes:
             if m not in skip_months:
                 lines.append(f"{dt} UPI-SHOP{m:02d}{d:02d}-PAYMENT 0000412345 {dt} 1,250.00 {bal:,.2f}")
     return _text_pdf(lines)
+
+
+def amex_statement() -> bytes:
+    """American Express India: dates without a year ("October 29"), amounts right-aligned, and a payment's "CR"
+    printed on the line below its amount, next to the card number."""
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    c.setFont("Helvetica", 9)
+    y = 800
+
+    def row(left, mid="", right="", x_mid=130):
+        nonlocal y
+        c.drawString(40, y, left)
+        if mid:
+            c.drawString(x_mid, y, mid)
+        if right:
+            c.drawRightString(550, y, right)
+        y -= 16
+
+    row("American Express Banking Corp.")
+    row("Statement of Account", "Membership Rewards Credit Card", x_mid=200)
+    row("Prepared for", "Card Number", "XXXX-XXXXXX-91008", x_mid=200)
+    row("Opening Balance Rs", "New Credits Rs  New Debits Rs", "Closing Balance Rs", x_mid=200)
+    row("73,507.75", "73,507.75   4,594.42", "4,594.42", x_mid=200)
+    row("Minimum Payment Due Rs 230.00", "Payment Due Date December 4, 2025", x_mid=300)
+    row("Credit Summary", "Credit Limit Rs  Available Credit Limit Rs", x_mid=200)
+    row("At November 14, 2025", "360,000.00  355,405.58", x_mid=200)
+    row("Current Rates of Interest", "Monthly Rate Goods And Services 3.50%", x_mid=200)
+    row("Details", "Foreign Spending", "Amount Rs", x_mid=330)
+    row("October 29", "PAYMENT RECEIVED. THANK YOU", "73,507.75")
+    y += 6
+    row("Card Number XXXX-XXXXXX-91008", "", "CR")
+    row("October 15", "Billdesk*AMAZON       MUM", "1,453.00")
+    row("October 18", "ICICI*RACHNA FUELS BHOP BHOPAL", "414.00")
+    row("October 19", "ICICI*SHIVAM FILLING ST BHOPAL", "1,810.00")
+    row("October 20", "paytm*JUBILANTFOODWORKS Noida", "188.00")
+    row("October 20", "SBIP*MANOHAR FOODS BHOP BHOPAL", "370.00")
+    row("October 26", "billdesk*BURGERKING    MUM", "239.42")
+    row("November 10", "ESBY*M S RBS FEAST HOUS BHOPAL", "120.00")
+    row("Page 1 of 1")
+    c.save()
+    return buf.getvalue()

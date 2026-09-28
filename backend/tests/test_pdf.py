@@ -295,3 +295,23 @@ def test_partly_read_statement_is_flagged_in_audit_and_coverage(client):
     assert cov["2025-06"]["status"] == "warn" and cov["2025-06"]["statements"][0]["problem"].startswith("No rows were read")
     assert cov["2025-04"]["status"] == "warn"  # the file's own warning: its balance breaks
     assert cov["2026-03"]["status"] == "warn"
+
+
+def test_amex_yearless_dates_and_cr_on_the_next_line():
+    from tests.pdf_fixtures import amex_statement
+    info, rows, warnings = parse(amex_statement())
+    assert info == {"kind": "card", "institution": "American Express", "last4": "1008"}
+    got = [(r["date"].isoformat(), r["narration"], r["debit"], r["credit"]) for r in rows]
+    assert got[0] == ("2025-10-29", "PAYMENT RECEIVED. THANK YOU", 0, Decimal("73507.75"))
+    assert got[1] == ("2025-10-15", "Billdesk*AMAZON MUM", Decimal("1453.00"), 0)
+    assert got[-1] == ("2025-11-10", "ESBY*M S RBS FEAST HOUS BHOPAL", Decimal("120.00"), 0)
+    assert len(rows) == 8 and not any("add up" in w for w in warnings)
+
+
+def test_yearless_dates_roll_back_a_year_across_january():
+    from app.services.pdf import add_years
+    text = "Statement date January 14, 2026\nDecember 20 SWIGGY 300.00\nJanuary 3 UBER 150.00\nDecathlon 12 things\n"
+    out = add_years(text)
+    assert "20 Dec 2025 SWIGGY" in out and "03 Jan 2026 UBER" in out and "Decathlon 12 things" in out
+    # Statements that already print full dates are left alone.
+    assert add_years("01/04/2025 ZOMATO 640.00\nMay 5 note") == "01/04/2025 ZOMATO 640.00\nMay 5 note"

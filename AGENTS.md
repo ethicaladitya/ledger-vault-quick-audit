@@ -92,6 +92,8 @@ Only Caddy publishes ports. The containers run as non-root. The OpenAPI docs are
        the two line readers) and keeps the best. For a card statement, a reading that adds up against previous
        balance + purchases − payments = total due wins. `clean_line` strips icons, `(cid:N)` glyphs and stray dots,
        and treats a trailing `+` as a credit.
+       Year-less dates (Amex: "October 29") get their year from the statement date (`add_years`), and a card
+       row's "CR" printed on the line below its amount marks it as a credit.
      - Bank PDFs use the running-balance delta to decide debit or credit.
   5. **Cross-file dedupe**: `find_same_statement` detects when ≥80% of the rows already exist in another account; the
      file is then merged into that account instead of creating a second one. Rows overlapping an earlier statement of
