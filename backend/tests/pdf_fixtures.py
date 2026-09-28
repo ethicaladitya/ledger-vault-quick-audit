@@ -148,3 +148,22 @@ def hdfc_wrapped_card_statement() -> bytes:
         "BANGALORE",
         "22/01/2026| 00:00    REFUND AMAZON PAY                               + C 1,299.00",
     ])
+
+
+def hdfc_year_statement(skip_months=()) -> bytes:
+    """A year of HDFC-style savings rows (date, narration, ref, value date, withdrawal, balance), three a month.
+    Months in skip_months are left out while the balance still moves, as when pages of a file weren't read."""
+    from datetime import date
+    from decimal import Decimal
+    lines = ["HDFC BANK Ltd.   Statement of account   Account No : 50100012346153",
+             "Date Narration Chq./Ref.No. Value Dt Withdrawal Amt. Deposit Amt. Closing Balance",
+             "Opening Balance 50,000.00"]
+    bal = Decimal("50000.00")
+    for m in [4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3]:
+        y = 2025 if m >= 4 else 2026
+        for d in (3, 12, 21):
+            bal -= Decimal("1250.00")
+            dt = date(y, m, d).strftime("%d/%m/%y")
+            if m not in skip_months:
+                lines.append(f"{dt} UPI-SHOP{m:02d}{d:02d}-PAYMENT 0000412345 {dt} 1,250.00 {bal:,.2f}")
+    return _text_pdf(lines)

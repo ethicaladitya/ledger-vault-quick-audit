@@ -221,7 +221,8 @@ def card_reconciliation(rows) -> dict:
     }
 
 
-BAD_READ = ("Doesn't add up", "Only one transaction was read")
+BAD_READ = ("Doesn't add up", "Only one transaction was read", "Running balance breaks")
+NO_ROWS = "No rows were read for this month, though the statement runs through it"
 
 
 def statement_coverage(db: Session, workspace_id: int, fy: str | None) -> dict:
@@ -237,6 +238,9 @@ def statement_coverage(db: Session, workspace_id: int, fy: str | None) -> dict:
     spans = {doc_id: (lo, hi, n) for doc_id, lo, hi, n in
              db.query(Transaction.document_id, func.min(Transaction.txn_date), func.max(Transaction.txn_date), func.count(Transaction.id))
              .group_by(Transaction.document_id)}
+    doc_months = defaultdict(set)
+    for doc_id, d in db.query(Transaction.document_id, Transaction.txn_date).join(FinancialAccount).filter(FinancialAccount.workspace_id == workspace_id):
+        doc_months[doc_id].add(f"{d.year}-{d.month:02d}")
     out = []
     for a in sorted(accounts, key=lambda a: (a.kind != "card", a.name.lower())):
         cells: dict[str, dict] = {}
@@ -254,9 +258,11 @@ def statement_coverage(db: Session, workspace_id: int, fy: str | None) -> dict:
                     y, m = (y + 1, 1) if m == 12 else (y, m + 1)
             for key in covered:
                 c = cells.setdefault(key, {"status": "ok", "statements": []})
+                # A bank statement spanning a month with no rows in it was most likely not read in full.
+                empty = a.kind == "bank" and key not in doc_months[d.id]
                 c["statements"].append({"id": d.id, "from": lo.isoformat(), "to": hi.isoformat(), "rows": n, "total_due": str(d.total_due) if d.total_due is not None else None,
-                                        "problem": next((w for w in BAD_READ if w in (d.warnings or "")), None)})
-                if bad:
+                                        "problem": NO_ROWS if empty else next((w for w in BAD_READ if w in (d.warnings or "")), None)})
+                if bad or empty:
                     c["status"] = "warn"
         out.append({"account_id": a.id, "account": a.name, "kind": a.kind,
                     "months": {m: cells.get(m, {"status": "missing", "statements": []}) for m in months},
@@ -500,15 +506,28 @@ def flags(rows, fy: str | None) -> list[dict]:
         months_in_fy = [(start if m >= 4 else start + 1, m) for m in [4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 3]]
         today = date.today()
         by_account = defaultdict(set)
-        names = {}
+        names, spans = {}, {}
         for t, a in rows:
             by_account[a.id].add((t.txn_date.year, t.txn_date.month))
             names[a.id] = a.name
+            if a.kind == "bank":
+                lo, hi, _ = spans.get(t.document_id, (t.txn_date, t.txn_date, a.id))
+                spans[t.document_id] = (min(lo, t.txn_date), max(hi, t.txn_date), a.id)
         for acc_id, seen in by_account.items():
-            missing = [MONTHS[i] for i, ym in enumerate(months_in_fy) if ym not in seen and date(ym[0], ym[1], 1) <= today]
+            gaps = [ym for ym in months_in_fy if ym not in seen and date(ym[0], ym[1], 1) <= today]
+            missing = [MONTHS[months_in_fy.index(ym)] for ym in gaps]
             if missing and len(missing) < 12:
-                add("info", f"{names[acc_id]}: no transactions in {', '.join(missing)}",
-                    "This may be a missing statement period. Upload it if the account was active.")
+                # Inside the dates of an uploaded statement: that file was read only in part, it isn't missing.
+                inside = [MONTHS[months_in_fy.index(ym)] for ym in gaps
+                          if any(acc == acc_id and (lo.year, lo.month) < ym < (hi.year, hi.month) for lo, hi, acc in spans.values())]
+                if inside:
+                    add("warning", f"{names[acc_id]}: no transactions read for {', '.join(inside)}",
+                        "An uploaded statement runs through these months, but no rows were read for them, so part of the file was "
+                        "probably not read. Check that statement's import warnings under Statement coverage, then delete and re-upload it.")
+                outside = [m for m in missing if m not in inside]
+                if outside:
+                    add("info", f"{names[acc_id]}: no transactions in {', '.join(outside)}",
+                        "This may be a missing statement period. Upload it if the account was active.")
     if not rows:
         add("info", "No statements uploaded for this year", "Upload bank and credit card statements to begin.")
     return out

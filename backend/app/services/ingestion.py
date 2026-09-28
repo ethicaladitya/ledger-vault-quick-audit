@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from ..models import SourceDocument, FinancialAccount, Transaction, AuditEvent, UserRule
 from .rules import classify
 from .passwords import Hints
-from .pdf import NeedsPassword, PdfError, unlock, read_pdf, detect, parse_pdf, account_name as pdf_account_name
+from .pdf import NeedsPassword, PdfError, unlock, read_pdf, detect, parse_pdf, balance_gaps, gap_warning, account_name as pdf_account_name
 
 MAX_FILE = 50 * 1024 * 1024
 SUPPORTED = {".pdf", ".csv", ".txt", ".xlsx", ".xlsm", ".xls"}
@@ -272,6 +272,13 @@ def load(filename: str, data: bytes, hints: Hints) -> Loaded:
 
 
 def parse_loaded(loaded: Loaded, kind: str) -> tuple[list[dict], list[str]]:
+    rows, warnings = _parse_loaded(loaded, kind)
+    if kind == "bank" and (gaps := balance_gaps(rows)):
+        warnings.append(gap_warning(gaps))
+    return rows, warnings
+
+
+def _parse_loaded(loaded: Loaded, kind: str) -> tuple[list[dict], list[str]]:
     warnings: list[str] = []
     if loaded.sheets is None:
         diag: dict = {}
