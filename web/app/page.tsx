@@ -131,7 +131,10 @@ function Workspace({ token, onLogout }: { token: string; onLogout: () => void })
     return () => window.removeEventListener("hashchange", fromHash);
   }, []);
   useEffect(() => {
-    api.get<Year[]>("/years").then(ys => { setYears(ys); setFy(cur => (cur && ys.some(y => y.financial_year === cur) ? cur : ys[0]?.financial_year ?? "")); }).catch(() => {});
+    // Open on the year with the most rows, not the newest: a statement ending on 31 Mar often carries a row or two
+    // dated 1 Apr, which would otherwise open a nearly empty next year.
+    const busiest = (ys: Year[]) => ys.reduce<Year | undefined>((b, y) => (!b || y.transactions > b.transactions ? y : b), undefined)?.financial_year ?? "";
+    api.get<Year[]>("/years").then(ys => { setYears(ys); setFy(cur => (cur && ys.some(y => y.financial_year === cur) ? cur : busiest(ys))); }).catch(() => {});
   }, [api, version]);
 
   const go = (v: ViewId, filter = "") => { setTxFilter(filter); setView(v); window.location.hash = v; window.scrollTo(0, 0); };
